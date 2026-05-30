@@ -1322,6 +1322,8 @@ function TradeHistory({ trades, onCloseTrade, onDeleteTrade, onUpdateTrade }) {
     key: 'created_at',
     direction: 'desc',
   });
+  
+
   const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
 
   const filteredAndSortedTrades = useMemo(() => {
