@@ -1,94 +1,109 @@
-import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+/**
+ * supabase/functions/api-health/index.ts
+ *
+ * Returns liveness + latency for Helius and BirdEye.
+ * Expected response shape (read by WalletImport.useEffect):
+ * {
+ *   helius: { ok: boolean, configured: boolean, latency_ms?: number, error?: string },
+ *   birdeye: { ok: boolean, configured: boolean, latency_ms?: number, error?: string },
+ * }
+ */
 
-const BIRDEYE_API_KEY = Deno.env.get("BIRDEYE_API_KEY") ?? "";
-const HELIUS_API_KEY = Deno.env.get("HELIUS_API_KEY") ?? "";
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
-const corsHeaders = {
+const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
 };
 
-function jsonRes(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+serve(async (req: Request) => {
+  // Handle CORS preflight
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  }
+
+  const HELIUS_API_KEY = Deno.env.get("HELIUS_API_KEY") ?? "";
+  const BIRDEYE_API_KEY = Deno.env.get("BIRDEYE_API_KEY") ?? "";
+
+  const heliusConfigured = HELIUS_API_KEY.length > 0;
+  const birdeyeConfigured = BIRDEYE_API_KEY.length > 0;
+
+  // ── Helius ping ─────────────────────────────────────────────────────────────
+  // Use getLatestBlockhash — cheap, always reachable, no credit cost.
+  const heliusResult = await (async () => {
+    if (!heliusConfigured) {
+      return { ok: false, configured: false, error: "HELIUS_API_KEY not set" };
+    }
+    const t0 = Date.now();
+    try {
+      const res = await fetch(
+        `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "getLatestBlockhash",
+            params: [{ commitment: "confirmed" }],
+          }),
+          signal: AbortSignal.timeout(8_000),
+        }
+      );
+      const latency_ms = Date.now() - t0;
+      if (!res.ok) {
+        return { ok: false, configured: true, latency_ms, error: `HTTP ${res.status}` };
+      }
+      const json = await res.json();
+      if (json.error) {
+        return { ok: false, configured: true, latency_ms, error: String(json.error.message ?? json.error) };
+      }
+      return { ok: true, configured: true, latency_ms };
+    } catch (e) {
+      return { ok: false, configured: true, error: (e as Error).message };
+    }
+  })();
+
+  // ── BirdEye ping ────────────────────────────────────────────────────────────
+  // Use /defi/price for SOL — tiny payload, publicly documented endpoint.
+  const birdeyeResult = await (async () => {
+    if (!birdeyeConfigured) {
+      return { ok: false, configured: false, error: "BIRDEYE_API_KEY not set" };
+    }
+    const t0 = Date.now();
+    try {
+      const res = await fetch(
+        "https://public-api.birdeye.so/defi/price?address=So11111111111111111111111111111111111111112",
+        {
+          headers: {
+            "X-API-KEY": BIRDEYE_API_KEY,
+            "x-chain": "solana",
+          },
+          signal: AbortSignal.timeout(8_000),
+        }
+      );
+      const latency_ms = Date.now() - t0;
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, configured: true, latency_ms, error: "Invalid BirdEye API key" };
+      }
+      if (!res.ok) {
+        return { ok: false, configured: true, latency_ms, error: `HTTP ${res.status}` };
+      }
+      const json = await res.json();
+      if (!json.success) {
+        return { ok: false, configured: true, latency_ms, error: json.message ?? "BirdEye returned success=false" };
+      }
+      return { ok: true, configured: true, latency_ms };
+    } catch (e) {
+      return { ok: false, configured: true, error: (e as Error).message };
+    }
+  })();
+
+  const body = JSON.stringify({ helius: heliusResult, birdeye: birdeyeResult });
+
+  return new Response(body, {
+    status: 200,
+    headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
   });
-}
-
-async function checkHelius(): Promise<{ ok: boolean; latency_ms: number; error?: string }> {
-  if (!HELIUS_API_KEY) return { ok: false, latency_ms: 0, error: "HELIUS_API_KEY not configured" };
-  const start = Date.now();
-  try {
-    // Use a known wallet with transactions (Serum deployer) as a health-check target
-    const url = `https://api.helius.xyz/v0/addresses/9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM/transactions?api-key=${HELIUS_API_KEY}&limit=1`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    const latency_ms = Date.now() - start;
-    if (res.status === 401 || res.status === 403) {
-      return { ok: false, latency_ms, error: "Invalid API key (401/403)" };
-    }
-    if (res.status === 429) {
-      return { ok: false, latency_ms, error: "Rate limited (429)" };
-    }
-    if (!res.ok) {
-      return { ok: false, latency_ms, error: `HTTP ${res.status}` };
-    }
-    return { ok: true, latency_ms };
-  } catch (e) {
-    return { ok: false, latency_ms: Date.now() - start, error: e instanceof Error ? e.message : String(e) };
-  }
-}
-
-async function checkBirdeye(): Promise<{ ok: boolean; latency_ms: number; error?: string }> {
-  if (!BIRDEYE_API_KEY) return { ok: false, latency_ms: 0, error: "BIRDEYE_API_KEY not configured" };
-  const start = Date.now();
-  try {
-    // Price check for SOL as a lightweight health-check
-    const url = "https://public-api.birdeye.so/defi/price?address=So11111111111111111111111111111111111111112";
-    const res = await fetch(url, {
-      headers: { "X-API-KEY": BIRDEYE_API_KEY },
-      signal: AbortSignal.timeout(8000),
-    });
-    const latency_ms = Date.now() - start;
-    if (res.status === 401 || res.status === 403) {
-      return { ok: false, latency_ms, error: "Invalid API key (401/403)" };
-    }
-    if (res.status === 429) {
-      return { ok: false, latency_ms, error: "Rate limited (429)" };
-    }
-    if (!res.ok) {
-      return { ok: false, latency_ms, error: `HTTP ${res.status}` };
-    }
-    const j = await res.json();
-    if (!j?.data?.value) {
-      return { ok: false, latency_ms, error: "Unexpected response shape" };
-    }
-    return { ok: true, latency_ms };
-  } catch (e) {
-    return { ok: false, latency_ms: Date.now() - start, error: e instanceof Error ? e.message : String(e) };
-  }
-}
-
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
-
-  try {
-    const [helius, birdeye] = await Promise.all([checkHelius(), checkBirdeye()]);
-
-    return jsonRes({
-      helius: {
-        configured: HELIUS_API_KEY.length > 0,
-        ...helius,
-      },
-      birdeye: {
-        configured: BIRDEYE_API_KEY.length > 0,
-        ...birdeye,
-      },
-      all_ok: helius.ok && birdeye.ok,
-      checked_at: new Date().toISOString(),
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return jsonRes({ error: message }, 500);
-  }
 });
