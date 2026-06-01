@@ -121,6 +121,7 @@ interface WatchlistItem {
 }
 
 const STORAGE_KEY_WATCHLIST = 'narrative_watchlist';
+const STORAGE_KEY_WALLET_SCAN = 'narrative_wallet_scan';
 
 // ─── helpers to load from localStorage (fallback) ────────────────────────────
 function loadLocalTrades(): Trade[] {
@@ -4033,13 +4034,23 @@ interface ApiHealthState {
 }
 
 function WalletImport({ onImport }: { onImport: (trades: Array<Omit<Trade, 'id' | 'created_at' | 'pnl' | 'rr_ratio'>>) => void }) {
-  const [address, setAddress] = useState('');
+  // ── Restore persisted scan state on mount ────────────────────────────────
+  const _persisted = (() => {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY_WALLET_SCAN) || 'null'); } catch { return null; }
+  })();
+
+  const [address, setAddress] = useState<string>(_persisted?.address ?? '');
   const [validationError, setValidationError] = useState('');
-  const [status, setStatus] = useState<ScanStatus>('idle');
-  const [scanStep, setScanStep] = useState(0);
-  const [results, setResults] = useState<WalletTradeResult[]>([]);
+  // Never restore a mid-scan state — drop back to idle so the user can retry
+  const [status, setStatus] = useState<ScanStatus>(
+    _persisted?.status === 'scanning' ? 'idle' : (_persisted?.status ?? 'idle'),
+  );
+  const [scanStep, setScanStep] = useState<number>(
+    _persisted?.status === 'scanning' ? 0 : (_persisted?.scanStep ?? 0),
+  );
+  const [results, setResults] = useState<WalletTradeResult[]>(_persisted?.results ?? []);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [debugData, setDebugData] = useState<any>(null);
+  const [debugData, setDebugData] = useState<any>(_persisted?.debugData ?? null);
   const [apiHealth, setApiHealth] = useState<ApiHealthState>({
     helius: { status: 'checking', configured: false },
     birdeye: { status: 'checking', configured: false },
@@ -4188,10 +4199,34 @@ function WalletImport({ onImport }: { onImport: (trades: Array<Omit<Trade, 'id' 
       exit_price: t.exit_price,
       screenshots: [],
     })));
+    try { localStorage.removeItem(STORAGE_KEY_WALLET_SCAN); } catch { /* ignore */ }
     setDone(true);
   };
 
   const handleReset = () => {
+    setAddress('');
+    setValidationError('');
+    setStatus('idle');
+    setScanStep(0);
+    setResults([]);
+    setErrorMessage('');
+    setImporting(false);
+    setDone(false);
+    setDebugData(null);
+  };
+
+  // ── Persist scan state to localStorage whenever it changes ───────────────
+  useEffect(() => {
+    // Don't persist transient (scanning) or terminal (done) states
+    if (status === 'scanning' || done) return;
+    try {
+      localStorage.setItem(STORAGE_KEY_WALLET_SCAN, JSON.stringify({ address, status, scanStep, results, debugData }));
+    } catch { /* storage full — ignore */ }
+  }, [address, status, scanStep, results, debugData, done]);
+
+  // ── Clear all persisted scan data and reset to idle ──────────────────────
+  const handleClearScan = () => {
+    try { localStorage.removeItem(STORAGE_KEY_WALLET_SCAN); } catch { /* ignore */ }
     setAddress('');
     setValidationError('');
     setStatus('idle');
@@ -4245,6 +4280,15 @@ function WalletImport({ onImport }: { onImport: (trades: Array<Omit<Trade, 'id' 
         <div className="flex items-center gap-2.5 px-4 py-3 border-b border-gray-800/60 bg-gray-900/30">
           <Activity className="w-3.5 h-3.5 text-gray-500" />
           <p className="text-xs font-semibold text-gray-300">Connection Status</p>
+          {(status === 'found' || status === 'empty' || status === 'error') && (
+            <button
+              onClick={handleClearScan}
+              className="ml-2 flex items-center gap-1 text-[10px] text-gray-600 hover:text-red-400 border border-transparent hover:border-red-500/30 rounded px-1.5 py-0.5 transition-colors"
+              title="Clear saved scan and start over"
+            >
+              <XCircle className="w-3 h-3" /> Clear
+            </button>
+          )}
           <button
             onClick={() => {
               setApiHealth({
