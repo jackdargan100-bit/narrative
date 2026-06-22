@@ -121,7 +121,6 @@ interface WatchlistItem {
 }
 
 const STORAGE_KEY_WATCHLIST = 'narrative_watchlist';
-const STORAGE_KEY_WALLET_SCAN = 'narrative_wallet_scan';
 
 // ─── helpers to load from localStorage (fallback) ────────────────────────────
 function loadLocalTrades(): Trade[] {
@@ -422,6 +421,7 @@ function App() {
                     onAddWatchlist={handleAddWatchlistItem}
                     onDeleteWatchlist={handleDeleteWatchlistItem}
                     onLogTrade={() => setActiveTab('add')}
+                    onImport={() => setActiveTab('import')}
                   />
                 )}
                 {activeTab === 'add' && (
@@ -791,7 +791,7 @@ function Sidebar({ activeTab, setActiveTab, collapsed, onToggleCollapse, mobileO
   );
 }
 
-function Dashboard({ openTrades, closedTrades, winRate, totalPnL, avgRR, onCloseTrade, onDeleteTrade, trades, watchlist, onAddWatchlist, onDeleteWatchlist, onLogTrade }) {
+function Dashboard({ openTrades, closedTrades, winRate, totalPnL, avgRR, onCloseTrade, onDeleteTrade, trades, watchlist, onAddWatchlist, onDeleteWatchlist, onLogTrade, onImport }) {
   const recentTrades = [...trades].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).slice(0, 10);
   const isEmpty = trades.length === 0;
 
@@ -895,8 +895,42 @@ function Dashboard({ openTrades, closedTrades, winRate, totalPnL, avgRR, onClose
                   </h2>
                 </div>
                 {closedTrades.length === 0 ? (
-                  <div className="bg-[#12141a]/40 border border-dashed border-gray-800/60 rounded-xl p-6 text-center">
-                    <p className="text-gray-600 text-sm">Close a trade to see it here</p>
+                  <div className="bg-[#12141a]/60 border border-dashed border-gray-800/60 rounded-xl overflow-hidden">
+                    <div className="flex items-start gap-3 px-5 pt-5 pb-4">
+                      <div className="w-8 h-8 rounded-lg bg-gray-800/80 border border-gray-700/50 flex items-center justify-center flex-shrink-0 mt-0.5">
+                        <Target className="w-4 h-4 text-gray-600" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-semibold text-gray-400">No closed trades yet</p>
+                        <p className="text-xs text-gray-600 mt-0.5 leading-relaxed">
+                          Close a position or import your wallet history to start building your performance record.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 px-4 pb-4">
+                      <button
+                        onClick={onImport}
+                        className="group flex items-center gap-2.5 px-4 py-3 bg-cyan-500/8 border border-cyan-500/20 rounded-xl hover:bg-cyan-500/12 hover:border-cyan-500/35 transition-all text-left"
+                      >
+                        <Download className="w-4 h-4 text-cyan-400 flex-shrink-0" />
+                        <div>
+                          <p className="text-xs font-semibold text-cyan-400">Import Wallet</p>
+                          <p className="text-[10px] text-gray-600">Scan a Solana wallet for past swaps</p>
+                        </div>
+                        <ArrowRight className="w-3.5 h-3.5 text-cyan-700 group-hover:text-cyan-500 group-hover:translate-x-0.5 transition-all ml-auto flex-shrink-0" />
+                      </button>
+                      <button
+                        onClick={onLogTrade}
+                        className="group flex items-center gap-2.5 px-4 py-3 bg-emerald-500/8 border border-emerald-500/20 rounded-xl hover:bg-emerald-500/12 hover:border-emerald-500/35 transition-all text-left"
+                      >
+                        <PlusCircle className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                        <div>
+                          <p className="text-xs font-semibold text-emerald-400">Log a Trade</p>
+                          <p className="text-[10px] text-gray-600">Enter an entry and exit manually</p>
+                        </div>
+                        <ArrowRight className="w-3.5 h-3.5 text-emerald-700 group-hover:text-emerald-500 group-hover:translate-x-0.5 transition-all ml-auto flex-shrink-0" />
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-2 2xl:grid-cols-3">
@@ -910,7 +944,7 @@ function Dashboard({ openTrades, closedTrades, winRate, totalPnL, avgRR, onClose
 
             {/* Right panel: activity + watchlist */}
             <div className="space-y-4 min-w-0">
-              <RecentActivityPanel trades={recentTrades} />
+              <RecentActivityPanel trades={recentTrades} onLogTrade={onLogTrade} />
               <WatchlistPanel watchlist={watchlist} onAdd={onAddWatchlist} onDelete={onDeleteWatchlist} />
             </div>
           </div>
@@ -1135,7 +1169,7 @@ function TradeCard({ trade, onClose, onDelete }) {
   );
 }
 
-function RecentActivityPanel({ trades }: { trades: Trade[] }) {
+function RecentActivityPanel({ trades, onLogTrade }: { trades: Trade[]; onLogTrade: () => void }) {
   const formatPrice = (price: number) => {
     if (price >= 1) return `$${price.toFixed(4)}`;
     if (price >= 0.0001) return `$${price.toFixed(6)}`;
@@ -1163,8 +1197,21 @@ function RecentActivityPanel({ trades }: { trades: Trade[] }) {
 
       <div className="divide-y divide-gray-800/40 max-h-72 overflow-y-auto scrollbar-thin">
         {trades.length === 0 ? (
-          <div className="p-6 text-center">
-            <p className="text-gray-600 text-xs">No recent activity</p>
+          <div className="px-4 py-5 space-y-3">
+            <div className="flex items-center gap-2">
+              <History className="w-4 h-4 text-gray-700 flex-shrink-0" />
+              <p className="text-xs font-semibold text-gray-500">No activity yet</p>
+            </div>
+            <p className="text-[11px] text-gray-700 leading-relaxed">
+              This feed shows your recent trade events — opens, closes, and P&amp;L updates — as they happen.
+            </p>
+            <button
+              onClick={onLogTrade}
+              className="flex items-center gap-1.5 text-[11px] font-medium text-emerald-600 hover:text-emerald-400 transition-colors"
+            >
+              <PlusCircle className="w-3 h-3 flex-shrink-0" />
+              Log your first trade
+            </button>
           </div>
         ) : (
           trades.map((trade) => {
@@ -1273,10 +1320,25 @@ function WatchlistPanel({ watchlist, onAdd, onDelete }: {
       )}
 
       <div className="divide-y divide-gray-800/40 max-h-64 overflow-y-auto scrollbar-thin">
-        {watchlist.length === 0 ? (
-          <div className="p-6 text-center">
-            <Star className="w-6 h-6 text-gray-700 mx-auto mb-2" />
-            <p className="text-gray-600 text-xs">Watchlist is empty</p>
+        {watchlist.length === 0 && !showForm ? (
+          <div className="px-4 py-4 space-y-3">
+            <div className="flex items-start gap-2.5">
+              <div className="w-7 h-7 rounded-lg bg-orange-500/10 border border-orange-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+                <Eye className="w-3.5 h-3.5 text-orange-400" />
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-gray-300">Track tokens before you trade</p>
+                <p className="text-[11px] text-gray-600 mt-0.5 leading-relaxed">
+                  Add tokens you're watching to your watchlist. Monitor setups and jump in when the time is right.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowForm(true)}
+              className="w-full py-2 bg-orange-500/15 text-orange-400 border border-orange-500/25 rounded-lg text-xs font-semibold hover:bg-orange-500/25 hover:border-orange-500/40 transition-all flex items-center justify-center gap-1.5"
+            >
+              <Star className="w-3.5 h-3.5" /> Add First Token
+            </button>
           </div>
         ) : (
           watchlist.map((item) => (
@@ -4034,23 +4096,13 @@ interface ApiHealthState {
 }
 
 function WalletImport({ onImport }: { onImport: (trades: Array<Omit<Trade, 'id' | 'created_at' | 'pnl' | 'rr_ratio'>>) => void }) {
-  // ── Restore persisted scan state on mount ────────────────────────────────
-  const _persisted = (() => {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY_WALLET_SCAN) || 'null'); } catch { return null; }
-  })();
-
-  const [address, setAddress] = useState<string>(_persisted?.address ?? '');
+  const [address, setAddress] = useState('');
   const [validationError, setValidationError] = useState('');
-  // Never restore a mid-scan state — drop back to idle so the user can retry
-  const [status, setStatus] = useState<ScanStatus>(
-    _persisted?.status === 'scanning' ? 'idle' : (_persisted?.status ?? 'idle'),
-  );
-  const [scanStep, setScanStep] = useState<number>(
-    _persisted?.status === 'scanning' ? 0 : (_persisted?.scanStep ?? 0),
-  );
-  const [results, setResults] = useState<WalletTradeResult[]>(_persisted?.results ?? []);
+  const [status, setStatus] = useState<ScanStatus>('idle');
+  const [scanStep, setScanStep] = useState(0);
+  const [results, setResults] = useState<WalletTradeResult[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [debugData, setDebugData] = useState<any>(_persisted?.debugData ?? null);
+  const [debugData, setDebugData] = useState<any>(null);
   const [apiHealth, setApiHealth] = useState<ApiHealthState>({
     helius: { status: 'checking', configured: false },
     birdeye: { status: 'checking', configured: false },
@@ -4199,34 +4251,10 @@ function WalletImport({ onImport }: { onImport: (trades: Array<Omit<Trade, 'id' 
       exit_price: t.exit_price,
       screenshots: [],
     })));
-    try { localStorage.removeItem(STORAGE_KEY_WALLET_SCAN); } catch { /* ignore */ }
     setDone(true);
   };
 
   const handleReset = () => {
-    setAddress('');
-    setValidationError('');
-    setStatus('idle');
-    setScanStep(0);
-    setResults([]);
-    setErrorMessage('');
-    setImporting(false);
-    setDone(false);
-    setDebugData(null);
-  };
-
-  // ── Persist scan state to localStorage whenever it changes ───────────────
-  useEffect(() => {
-    // Don't persist transient (scanning) or terminal (done) states
-    if (status === 'scanning' || done) return;
-    try {
-      localStorage.setItem(STORAGE_KEY_WALLET_SCAN, JSON.stringify({ address, status, scanStep, results, debugData }));
-    } catch { /* storage full — ignore */ }
-  }, [address, status, scanStep, results, debugData, done]);
-
-  // ── Clear all persisted scan data and reset to idle ──────────────────────
-  const handleClearScan = () => {
-    try { localStorage.removeItem(STORAGE_KEY_WALLET_SCAN); } catch { /* ignore */ }
     setAddress('');
     setValidationError('');
     setStatus('idle');
@@ -4280,15 +4308,6 @@ function WalletImport({ onImport }: { onImport: (trades: Array<Omit<Trade, 'id' 
         <div className="flex items-center gap-2.5 px-4 py-3 border-b border-gray-800/60 bg-gray-900/30">
           <Activity className="w-3.5 h-3.5 text-gray-500" />
           <p className="text-xs font-semibold text-gray-300">Connection Status</p>
-          {(status === 'found' || status === 'empty' || status === 'error') && (
-            <button
-              onClick={handleClearScan}
-              className="ml-2 flex items-center gap-1 text-[10px] text-gray-600 hover:text-red-400 border border-transparent hover:border-red-500/30 rounded px-1.5 py-0.5 transition-colors"
-              title="Clear saved scan and start over"
-            >
-              <XCircle className="w-3 h-3" /> Clear
-            </button>
-          )}
           <button
             onClick={() => {
               setApiHealth({
