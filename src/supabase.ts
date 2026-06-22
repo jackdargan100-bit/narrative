@@ -24,12 +24,39 @@ export type DbTrade = {
   created_at: string;
 };
 
+/** Shape of each item in favorite_wallets.saved_results (matches scan-wallet output). */
+export type DbWalletScanTrade = {
+  id: string;
+  token_name: string;
+  token_symbol: string;
+  contract_address: string;
+  entry_price: number;
+  exit_price: number | null;
+  stop_loss: number | null;
+  take_profit: number | null;
+  position_size: number;
+  setup_type: string;
+  notes: string;
+  status: 'open' | 'closed';
+  tx_signature: string;
+  timestamp: number;
+  trade_type: 'buy' | 'sell';
+  token_amount: number;
+  sol_amount: number;
+  usd_value: number | null;
+  selected: boolean;
+  mock: boolean;
+};
+
 export type DbWallet = {
   id: string;
   user_id: string;
   wallet_address: string;
   nickname: string;
   notes: string | null;
+  last_scanned_at: string | null;
+  trade_count: number;
+  saved_results: DbWalletScanTrade[] | null;
   created_at: string;
 };
 

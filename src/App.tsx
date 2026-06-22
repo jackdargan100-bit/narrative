@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import type { User, Session } from '@supabase/supabase-js';
 import { supabase } from './supabase';
+import type { DbWalletScanTrade } from './supabase';
 import {
   TrendingUp,
   TrendingDown,
@@ -104,6 +105,9 @@ interface FavoriteWallet {
   wallet_address: string;
   nickname: string;
   notes: string | null;
+  last_scanned_at: string | null;
+  trade_count: number;
+  saved_results: DbWalletScanTrade[] | null;
   created_at: string;
 }
 
