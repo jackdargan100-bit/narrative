@@ -111,6 +111,19 @@ interface FavoriteWallet {
   created_at: string;
 }
 
+function normalizeFavoriteWallet(row: Partial<FavoriteWallet>): FavoriteWallet {
+  return {
+    id: row.id ?? '',
+    wallet_address: row.wallet_address ?? '',
+    nickname: row.nickname ?? '',
+    notes: row.notes ?? null,
+    last_scanned_at: row.last_scanned_at ?? null,
+    trade_count: row.trade_count ?? 0,
+    saved_results: row.saved_results ?? null,
+    created_at: row.created_at ?? new Date().toISOString(),
+  };
+}
+
 const STORAGE_KEYS = {
   TRADES: 'narrative_trades',
   WALLETS: 'narrative_wallets',
@@ -131,7 +144,10 @@ function loadLocalTrades(): Trade[] {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.TRADES) || '[]'); } catch { return []; }
 }
 function loadLocalWallets(): FavoriteWallet[] {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.WALLETS) || '[]'); } catch { return []; }
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORAGE_KEYS.WALLETS) || '[]') as Partial<FavoriteWallet>[];
+    return raw.map(normalizeFavoriteWallet);
+  } catch { return []; }
 }
 function loadLocalWatchlist(): WatchlistItem[] {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY_WATCHLIST) || '[]'); } catch { return []; }
@@ -176,7 +192,7 @@ function App() {
       ]);
 
       if (tradesRes.data) setTrades(tradesRes.data as Trade[]);
-      if (walletsRes.data) setWallets(walletsRes.data as FavoriteWallet[]);
+      if (walletsRes.data) setWallets(walletsRes.data.map(w => normalizeFavoriteWallet(w as FavoriteWallet)));
       if (watchlistRes.data) setWatchlist(watchlistRes.data as WatchlistItem[]);
     } catch {
       // Supabase unavailable — fall back to localStorage
@@ -277,10 +293,86 @@ function App() {
     if (!user) return;
     const { data, error } = await supabase
       .from('favorite_wallets')
-      .insert({ ...wallet, user_id: user.id })
+      .insert({
+        wallet_address: wallet.wallet_address,
+        nickname: wallet.nickname,
+        notes: wallet.notes,
+        user_id: user.id,
+        last_scanned_at: wallet.last_scanned_at ?? null,
+        trade_count: wallet.trade_count ?? 0,
+        saved_results: wallet.saved_results ?? null,
+      })
       .select()
       .maybeSingle();
-    if (!error && data) setWallets(prev => [data as FavoriteWallet, ...prev]);
+    if (!error && data) setWallets(prev => [normalizeFavoriteWallet(data as FavoriteWallet), ...prev]);
+  };
+
+  const handleUpdateWallet = async (
+    id: string,
+    updates: { nickname?: string; notes?: string | null },
+  ): Promise<boolean> => {
+    if (!user) return false;
+    if (updates.nickname === undefined && updates.notes === undefined) return false;
+
+    setWallets(prev => prev.map(w => (w.id === id ? { ...w, ...updates } : w)));
+
+    const patch: { nickname?: string; notes?: string | null } = {};
+    if (updates.nickname !== undefined) patch.nickname = updates.nickname;
+    if (updates.notes !== undefined) patch.notes = updates.notes;
+
+    const { error } = await supabase
+      .from('favorite_wallets')
+      .update(patch)
+      .eq('id', id)
+      .eq('user_id', user.id);
+
+    return !error;
+  };
+
+  const handleUpsertWalletScan = async (payload: {
+    wallet_address: string;
+    saved_results: DbWalletScanTrade[];
+    nickname?: string;
+  }): Promise<FavoriteWallet | null> => {
+    if (!user) return null;
+
+    const trimmed = payload.wallet_address.trim();
+    if (!trimmed) return null;
+
+    const existing = wallets.find(w => w.wallet_address === trimmed);
+    const last_scanned_at = new Date().toISOString();
+    const trade_count = payload.saved_results.length;
+
+    const { data, error } = await supabase
+      .from('favorite_wallets')
+      .upsert(
+        {
+          user_id: user.id,
+          wallet_address: trimmed,
+          nickname: payload.nickname ?? existing?.nickname ?? `${trimmed.slice(0, 4)}…${trimmed.slice(-4)}`,
+          notes: existing?.notes ?? null,
+          last_scanned_at,
+          trade_count,
+          saved_results: payload.saved_results,
+        },
+        { onConflict: 'user_id,wallet_address' },
+      )
+      .select()
+      .maybeSingle();
+
+    if (error || !data) return null;
+
+    const normalized = normalizeFavoriteWallet(data as FavoriteWallet);
+    setWallets(prev => {
+      const idx = prev.findIndex(w => w.wallet_address === trimmed);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = normalized;
+        return next;
+      }
+      return [normalized, ...prev];
+    });
+    return normalized;
   };
 
   const handleDeleteWallet = async (id: string) => {
