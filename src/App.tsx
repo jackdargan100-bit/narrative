@@ -153,11 +153,49 @@ function formatRelativeScanTime(iso: string | null): string {
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-const WALLET_SCAN_STATUS_STYLES: Record<WalletScanStatus, { label: string; className: string }> = {
-  not_scanned: { label: 'Not scanned', className: 'bg-gray-800/60 text-gray-400 border-gray-700/50' },
-  ready: { label: 'Ready', className: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/25' },
-  empty: { label: 'No trades found', className: 'bg-orange-500/15 text-orange-400 border-orange-500/25' },
+const WALLET_SCAN_STATUS_STYLES: Record<WalletScanStatus, { label: string; hint: string; className: string }> = {
+  not_scanned: {
+    label: 'Not scanned yet',
+    hint: 'Re-scan to fetch trades from Helius.',
+    className: 'bg-gray-800/60 text-gray-400 border-gray-700/50',
+  },
+  ready: {
+    label: 'Scan saved',
+    hint: 'Open to review cached results instantly.',
+    className: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/25',
+  },
+  empty: {
+    label: 'Scanned · no trades',
+    hint: 'Scan completed; no swaps found in the last 100 txs.',
+    className: 'bg-orange-500/15 text-orange-400 border-orange-500/25',
+  },
 };
+
+type WalletSortBy = 'last_scanned' | 'trade_count' | 'nickname';
+
+function filterWallets(wallets: FavoriteWallet[], query: string): FavoriteWallet[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return wallets;
+  return wallets.filter(w =>
+    w.nickname.toLowerCase().includes(q) ||
+    w.wallet_address.toLowerCase().includes(q),
+  );
+}
+
+function sortWallets(wallets: FavoriteWallet[], sortBy: WalletSortBy): FavoriteWallet[] {
+  const sorted = [...wallets];
+  sorted.sort((a, b) => {
+    if (sortBy === 'last_scanned') {
+      if (!a.last_scanned_at && !b.last_scanned_at) return 0;
+      if (!a.last_scanned_at) return 1;
+      if (!b.last_scanned_at) return -1;
+      return new Date(b.last_scanned_at).getTime() - new Date(a.last_scanned_at).getTime();
+    }
+    if (sortBy === 'trade_count') return b.trade_count - a.trade_count;
+    return a.nickname.localeCompare(b.nickname, undefined, { sensitivity: 'base' });
+  });
+  return sorted;
+}
 
 type WalletImportLaunch = {
   mode: 'open' | 'rescan';
@@ -339,13 +377,13 @@ function App() {
   };
 
   // ── wallet CRUD ─────────────────────────────────────────────────────────────
-  const handleAddWallet = async (wallet: Omit<FavoriteWallet, 'id' | 'created_at'>) => {
-    if (!user) return;
+  const handleAddWallet = async (wallet: Omit<FavoriteWallet, 'id' | 'created_at'>): Promise<boolean> => {
+    if (!user) return false;
     const { data, error } = await supabase
       .from('favorite_wallets')
       .insert({
-        wallet_address: wallet.wallet_address,
-        nickname: wallet.nickname,
+        wallet_address: wallet.wallet_address.trim(),
+        nickname: wallet.nickname.trim(),
         notes: wallet.notes,
         user_id: user.id,
         last_scanned_at: wallet.last_scanned_at ?? null,
@@ -354,7 +392,9 @@ function App() {
       })
       .select()
       .maybeSingle();
-    if (!error && data) setWallets(prev => [normalizeFavoriteWallet(data as FavoriteWallet), ...prev]);
+    if (error || !data) return false;
+    setWallets(prev => [normalizeFavoriteWallet(data as FavoriteWallet), ...prev]);
+    return true;
   };
 
   const handleUpdateWallet = async (
@@ -363,6 +403,9 @@ function App() {
   ): Promise<boolean> => {
     if (!user) return false;
     if (updates.nickname === undefined && updates.notes === undefined) return false;
+
+    const previous = wallets.find(w => w.id === id);
+    if (!previous) return false;
 
     setWallets(prev => prev.map(w => (w.id === id ? { ...w, ...updates } : w)));
 
@@ -376,7 +419,11 @@ function App() {
       .eq('id', id)
       .eq('user_id', user.id);
 
-    return !error;
+    if (error) {
+      setWallets(prev => prev.map(w => (w.id === id ? previous : w)));
+      return false;
+    }
+    return true;
   };
 
   const handleUpsertWalletScan = async (payload: {
@@ -454,11 +501,19 @@ function App() {
     await handleUpsertWalletScan(payload);
   };
 
-  const handleDeleteWallet = async (id: string) => {
+  const handleDeleteWallet = async (id: string): Promise<boolean> => {
+    const previous = wallets.find(w => w.id === id);
+    if (!previous) return false;
+
     setWallets(prev => prev.filter(w => w.id !== id));
     if (user) {
-      await supabase.from('favorite_wallets').delete().eq('id', id).eq('user_id', user.id);
+      const { error } = await supabase.from('favorite_wallets').delete().eq('id', id).eq('user_id', user.id);
+      if (error) {
+        setWallets(prev => [previous, ...prev]);
+        return false;
+      }
     }
+    return true;
   };
 
   // ── derived stats ───────────────────────────────────────────────────────────
@@ -626,6 +681,7 @@ function App() {
                   <WalletLibrary
                     wallets={wallets}
                     onAdd={handleAddWallet}
+                    onUpdate={handleUpdateWallet}
                     onDelete={handleDeleteWallet}
                     onOpen={handleLibraryOpenWallet}
                     onRescan={handleLibraryRescanWallet}
@@ -3624,30 +3680,110 @@ function EmptyChartState({ msg }: { msg?: string }) {
 function WalletLibrary({
   wallets,
   onAdd,
+  onUpdate,
   onDelete,
   onOpen,
   onRescan,
 }: {
   wallets: FavoriteWallet[];
-  onAdd: (wallet: Omit<FavoriteWallet, 'id' | 'created_at'>) => void;
-  onDelete: (id: string) => void;
+  onAdd: (wallet: Omit<FavoriteWallet, 'id' | 'created_at'>) => Promise<boolean>;
+  onUpdate: (id: string, updates: { nickname?: string; notes?: string | null }) => Promise<boolean>;
+  onDelete: (id: string) => Promise<boolean>;
   onOpen: (wallet: FavoriteWallet) => void;
   onRescan: (wallet: FavoriteWallet) => void;
 }) {
   const [newWallet, setNewWallet] = useState({ wallet_address: '', nickname: '', notes: '' });
+  const [addError, setAddError] = useState<string | null>(null);
+  const [addSubmitting, setAddSubmitting] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortBy, setSortBy] = useState<WalletSortBy>('last_scanned');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState({ nickname: '', notes: '' });
+  const [editSubmitting, setEditSubmitting] = useState(false);
+  const [libraryBanner, setLibraryBanner] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
 
-  const handleAdd = (e: React.FormEvent) => {
+  const filteredSortedWallets = useMemo(() => {
+    return sortWallets(filterWallets(wallets, searchQuery), sortBy);
+  }, [wallets, searchQuery, sortBy]);
+
+  const showBanner = (type: 'error' | 'success', message: string) => {
+    setLibraryBanner({ type, message });
+    setTimeout(() => setLibraryBanner(null), 4000);
+  };
+
+  const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
-    onAdd({
-      wallet_address: newWallet.wallet_address,
-      nickname: newWallet.nickname,
+    setAddError(null);
+    setAddSubmitting(true);
+    const ok = await onAdd({
+      wallet_address: newWallet.wallet_address.trim(),
+      nickname: newWallet.nickname.trim(),
       notes: newWallet.notes.trim() || null,
     });
-    setNewWallet({ wallet_address: '', nickname: '', notes: '' });
+    setAddSubmitting(false);
+    if (ok) {
+      setNewWallet({ wallet_address: '', nickname: '', notes: '' });
+      showBanner('success', 'Wallet saved to your library.');
+    } else {
+      setAddError('Could not save wallet. This address may already be in your library.');
+    }
+  };
+
+  const startEdit = (wallet: FavoriteWallet) => {
+    setEditingId(wallet.id);
+    setEditDraft({ nickname: wallet.nickname, notes: wallet.notes ?? '' });
+    setLibraryBanner(null);
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditDraft({ nickname: '', notes: '' });
+  };
+
+  const saveEdit = async (id: string) => {
+    const nickname = editDraft.nickname.trim();
+    if (!nickname) {
+      showBanner('error', 'Nickname cannot be empty.');
+      return;
+    }
+    setEditSubmitting(true);
+    const ok = await onUpdate(id, {
+      nickname,
+      notes: editDraft.notes.trim() || null,
+    });
+    setEditSubmitting(false);
+    if (ok) {
+      setEditingId(null);
+      showBanner('success', 'Wallet updated.');
+    } else {
+      showBanner('error', 'Could not update wallet. Please try again.');
+    }
+  };
+
+  const handleDeleteClick = async (wallet: FavoriteWallet) => {
+    if (!confirm(`Remove "${wallet.nickname}" from your library? Saved scan results will be deleted.`)) return;
+    if (editingId === wallet.id) cancelEdit();
+    const ok = await onDelete(wallet.id);
+    if (!ok) showBanner('error', 'Could not delete wallet. Please try again.');
   };
 
   return (
     <div className="space-y-6">
+      {libraryBanner && (
+        <div className={`flex items-start gap-3 px-4 py-3 rounded-xl border ${
+          libraryBanner.type === 'error'
+            ? 'bg-red-500/8 border-red-500/20'
+            : 'bg-emerald-500/8 border-emerald-500/20'
+        }`}>
+          {libraryBanner.type === 'error'
+            ? <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+            : <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />}
+          <p className={`text-xs leading-relaxed ${libraryBanner.type === 'error' ? 'text-red-300/90' : 'text-emerald-300/90'}`}>
+            {libraryBanner.message}
+          </p>
+        </div>
+      )}
+
       <div className="bg-[#12141a]/90 backdrop-blur border border-gray-800/60 rounded-2xl p-6 sm:p-8">
         <div className="flex items-center gap-3 mb-6">
           <div className="w-10 h-10 rounded-lg bg-cyan-500/20 flex items-center justify-center">
@@ -3666,10 +3802,11 @@ function WalletLibrary({
               <input
                 type="text"
                 value={newWallet.wallet_address}
-                onChange={(e) => setNewWallet({ ...newWallet, wallet_address: e.target.value })}
+                onChange={(e) => { setNewWallet({ ...newWallet, wallet_address: e.target.value }); setAddError(null); }}
                 placeholder="Solana wallet address"
                 className="w-full bg-gray-900/50 border border-gray-800 rounded-xl px-4 py-3 focus:outline-none focus:border-cyan-500/50 focus:bg-gray-900/70 transition-all font-mono text-sm text-white placeholder-gray-600"
                 required
+                disabled={addSubmitting}
               />
             </div>
             <div>
@@ -3677,10 +3814,11 @@ function WalletLibrary({
               <input
                 type="text"
                 value={newWallet.nickname}
-                onChange={(e) => setNewWallet({ ...newWallet, nickname: e.target.value })}
+                onChange={(e) => { setNewWallet({ ...newWallet, nickname: e.target.value }); setAddError(null); }}
                 placeholder="e.g., Momentum Architect"
                 className="w-full bg-gray-900/50 border border-gray-800 rounded-xl px-4 py-3 focus:outline-none focus:border-cyan-500/50 focus:bg-gray-900/70 transition-all text-white placeholder-gray-600"
                 required
+                disabled={addSubmitting}
               />
             </div>
           </div>
@@ -3691,93 +3829,212 @@ function WalletLibrary({
               onChange={(e) => setNewWallet({ ...newWallet, notes: e.target.value })}
               placeholder="Why are you tracking this wallet?"
               className="w-full bg-gray-900/30 border border-gray-800/60 rounded-xl px-4 py-2.5 focus:outline-none focus:border-gray-700/80 focus:bg-gray-900/40 transition-all min-h-[56px] resize-y text-sm text-gray-400 placeholder-gray-700"
+              disabled={addSubmitting}
             />
           </div>
+          {addError && (
+            <p className="text-xs text-red-400 flex items-center gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+              {addError}
+            </p>
+          )}
           <button
             type="submit"
-            className="flex items-center gap-2 bg-gradient-to-r from-cyan-500 to-teal-500 text-white px-6 py-3.5 rounded-xl font-semibold hover:from-cyan-400 hover:to-teal-400 transition-all duration-200 shadow-lg shadow-cyan-500/20"
+            disabled={addSubmitting}
+            className="flex items-center gap-2 bg-gradient-to-r from-cyan-500 to-teal-500 text-white px-6 py-3.5 rounded-xl font-semibold hover:from-cyan-400 hover:to-teal-400 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-lg shadow-cyan-500/20"
           >
-            <PlusCircle className="w-4 h-4" />
-            Save Wallet
+            {addSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <PlusCircle className="w-4 h-4" />}
+            {addSubmitting ? 'Saving…' : 'Save Wallet'}
           </button>
         </form>
       </div>
 
       {wallets.length > 0 && (
-        <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {wallets.map((wallet) => {
-            const scanStatus = getWalletScanStatus(wallet);
-            const statusStyle = WALLET_SCAN_STATUS_STYLES[scanStatus];
-            const canOpen = wallet.last_scanned_at !== null;
-            const lastScannedLabel = wallet.last_scanned_at
-              ? `Last scanned ${formatRelativeScanTime(wallet.last_scanned_at)}`
-              : 'Never scanned';
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row gap-3">
+            <div className="relative group flex-1">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 group-focus-within:text-cyan-400 transition-colors" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search by nickname or address…"
+                className="w-full bg-gray-900/60 border border-gray-800/80 rounded-xl pl-11 pr-10 py-3 focus:outline-none focus:border-cyan-500/50 focus:ring-2 focus:ring-cyan-500/20 transition-all text-white placeholder-gray-600 text-sm"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 transition-colors"
+                >
+                  <XCircle className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as WalletSortBy)}
+              className="bg-gray-900/60 border border-gray-800/80 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/20 transition-all cursor-pointer sm:min-w-[200px]"
+            >
+              <option value="last_scanned">Last scanned</option>
+              <option value="trade_count">Trade count</option>
+              <option value="nickname">Name (A–Z)</option>
+            </select>
+          </div>
 
-            return (
-              <div
-                key={wallet.id}
-                className="bg-[#12141a]/90 backdrop-blur border border-gray-800/60 rounded-xl p-5 hover:border-cyan-500/30 transition-all duration-300 flex flex-col"
-              >
-                <div className="flex justify-between items-start gap-3 mb-3">
-                  <div className="flex-1 min-w-0">
-                    <h3 className="font-semibold text-lg text-white mb-1 truncate">{wallet.nickname}</h3>
-                    <p className="text-xs text-gray-500 font-mono truncate">
-                      {formatWalletAddress(wallet.wallet_address)}
-                    </p>
+          {filteredSortedWallets.length > 0 ? (
+            <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
+              {filteredSortedWallets.map((wallet) => {
+                const scanStatus = getWalletScanStatus(wallet);
+                const statusStyle = WALLET_SCAN_STATUS_STYLES[scanStatus];
+                const canOpen = wallet.last_scanned_at !== null;
+                const lastScannedLabel = wallet.last_scanned_at
+                  ? `Last scanned ${formatRelativeScanTime(wallet.last_scanned_at)}`
+                  : 'Never scanned';
+                const isEditing = editingId === wallet.id;
+
+                return (
+                  <div
+                    key={wallet.id}
+                    className="bg-[#12141a]/90 backdrop-blur border border-gray-800/60 rounded-xl p-5 hover:border-cyan-500/30 transition-all duration-300 flex flex-col"
+                  >
+                    <div className="flex justify-between items-start gap-3 mb-2">
+                      <div className="flex-1 min-w-0">
+                        {isEditing ? (
+                          <input
+                            type="text"
+                            value={editDraft.nickname}
+                            onChange={(e) => setEditDraft(d => ({ ...d, nickname: e.target.value }))}
+                            className="w-full bg-gray-900/60 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500/50 mb-1"
+                            placeholder="Nickname"
+                            disabled={editSubmitting}
+                          />
+                        ) : (
+                          <h3 className="font-semibold text-lg text-white mb-1 truncate">{wallet.nickname}</h3>
+                        )}
+                        <p className="text-xs text-gray-500 font-mono truncate">
+                          {formatWalletAddress(wallet.wallet_address)}
+                        </p>
+                      </div>
+                      <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+                        <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${statusStyle.className}`}>
+                          {statusStyle.label}
+                        </span>
+                        {!isEditing && (
+                          <button
+                            type="button"
+                            onClick={() => startEdit(wallet)}
+                            className="text-[10px] text-gray-500 hover:text-cyan-400 transition-colors flex items-center gap-1"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                            Edit
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <p className="text-[10px] text-gray-600 mb-3 leading-relaxed">{statusStyle.hint}</p>
+
+                    <div className="text-xs text-gray-400 mb-3 space-y-0.5">
+                      <p>{wallet.trade_count} trade{wallet.trade_count !== 1 ? 's' : ''}</p>
+                      <p className="text-gray-500">{lastScannedLabel}</p>
+                    </div>
+
+                    {isEditing ? (
+                      <div className="mb-3 space-y-2">
+                        <textarea
+                          value={editDraft.notes}
+                          onChange={(e) => setEditDraft(d => ({ ...d, notes: e.target.value }))}
+                          placeholder="Notes (optional)"
+                          className="w-full bg-gray-900/40 border border-gray-800/60 rounded-lg px-3 py-2 text-xs text-gray-400 placeholder-gray-600 min-h-[56px] resize-y focus:outline-none focus:border-gray-700"
+                          disabled={editSubmitting}
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void saveEdit(wallet.id)}
+                            disabled={editSubmitting}
+                            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-cyan-500/15 border border-cyan-500/30 text-cyan-400 rounded-lg text-xs font-semibold hover:bg-cyan-500/25 disabled:opacity-50 transition-colors"
+                          >
+                            {editSubmitting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelEdit}
+                            disabled={editSubmitting}
+                            className="flex-1 px-3 py-2 bg-gray-800/60 border border-gray-700/50 text-gray-400 rounded-lg text-xs font-semibold hover:text-gray-200 transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : wallet.notes ? (
+                      <p className="text-xs text-gray-500 line-clamp-2 bg-gray-800/20 rounded-lg p-2 mb-3">{wallet.notes}</p>
+                    ) : null}
+
+                    {!isEditing && (
+                      <div className="flex gap-2 mt-auto pt-1">
+                        <button
+                          type="button"
+                          onClick={() => onOpen(wallet)}
+                          disabled={!canOpen}
+                          title={canOpen ? 'Open saved scan results' : 'Re-scan to fetch trades first'}
+                          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-gray-800/60 border border-gray-700/50 text-gray-300 rounded-lg text-xs font-semibold hover:bg-gray-800 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-gray-800/60 disabled:hover:text-gray-300 transition-colors"
+                        >
+                          <BookOpen className="w-3.5 h-3.5" />
+                          Open
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onRescan(wallet)}
+                          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-gray-800/60 border border-gray-700/50 text-gray-300 rounded-lg text-xs font-semibold hover:bg-gray-800 hover:text-cyan-300 transition-colors"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          Re-scan
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteClick(wallet)}
+                          className="flex items-center justify-center gap-1.5 px-3 py-2 bg-gray-800/60 border border-gray-700/50 text-gray-400 rounded-lg text-xs font-semibold hover:bg-red-500/10 hover:border-red-500/30 hover:text-red-400 transition-colors"
+                          title="Remove wallet from library"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Delete
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border flex-shrink-0 ${statusStyle.className}`}>
-                    {statusStyle.label}
-                  </span>
-                </div>
-
-                <div className="text-xs text-gray-400 mb-3 space-y-0.5">
-                  <p>
-                    {wallet.trade_count} trade{wallet.trade_count !== 1 ? 's' : ''}
-                  </p>
-                  <p className="text-gray-500">{lastScannedLabel}</p>
-                </div>
-
-                {wallet.notes && (
-                  <p className="text-xs text-gray-500 line-clamp-2 bg-gray-800/20 rounded-lg p-2 mb-3">{wallet.notes}</p>
-                )}
-
-                <div className="flex gap-2 mt-auto pt-1">
-                  <button
-                    type="button"
-                    onClick={() => onOpen(wallet)}
-                    disabled={!canOpen}
-                    title={canOpen ? 'Open saved scan results' : 'Scan this wallet in Import Trades first'}
-                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-gray-800/60 border border-gray-700/50 text-gray-300 rounded-lg text-xs font-semibold hover:bg-gray-800 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-gray-800/60 disabled:hover:text-gray-300 transition-colors"
-                  >
-                    <BookOpen className="w-3.5 h-3.5" />
-                    Open
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onRescan(wallet)}
-                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-gray-800/60 border border-gray-700/50 text-gray-300 rounded-lg text-xs font-semibold hover:bg-gray-800 hover:text-cyan-300 transition-colors"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    Re-scan
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onDelete(wallet.id)}
-                    className="flex items-center justify-center gap-1.5 px-3 py-2 bg-gray-800/60 border border-gray-700/50 text-gray-400 rounded-lg text-xs font-semibold hover:bg-red-500/10 hover:border-red-500/30 hover:text-red-400 transition-colors"
-                    title="Remove wallet from library"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    Delete
-                  </button>
-                </div>
-              </div>
-            );
-          })}
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-center py-12 bg-[#12141a]/50 border border-gray-800/40 rounded-xl">
+              <Search className="w-8 h-8 text-gray-700 mx-auto mb-3" />
+              <p className="text-sm text-gray-400 mb-1">No wallets match your search</p>
+              <p className="text-xs text-gray-600 mb-4">Try a different nickname or address.</p>
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors"
+              >
+                Clear search
+              </button>
+            </div>
+          )}
         </div>
       )}
 
       {wallets.length === 0 && (
-        <EmptyState message="No saved wallets yet. Add a wallet above or scan one in Import Trades." />
+        <div className="text-center py-16 bg-[#12141a]/50 border border-gray-800/40 rounded-2xl">
+          <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center mx-auto mb-4">
+            <Wallet className="w-8 h-8 text-cyan-500/60" />
+          </div>
+          <h3 className="text-sm font-semibold text-white mb-2">No saved wallets yet</h3>
+          <p className="text-xs text-gray-500 max-w-sm mx-auto leading-relaxed">
+            Save a wallet above to track it here, or scan one in Import Trades — results will appear in your library automatically.
+          </p>
+        </div>
       )}
     </div>
   );
