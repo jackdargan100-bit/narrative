@@ -212,6 +212,28 @@ interface WalletScanMetrics {
   topTokenShare: number;
   repeatMintCount: number;
   roundTripMints: number;
+  closedCount: number;
+  openCount: number;
+  validClosedCount: number;
+  winRate: number;
+  avgReturnPct: number;
+  closedRatio: number;
+  openSolShare: number;
+  maxSolSize: number;
+  gapCv: number;
+  sizeCv: number;
+}
+
+interface WalletScoreItem {
+  value: number | null;
+  reason: string;
+}
+
+interface WalletScoresResult {
+  alpha: WalletScoreItem;
+  consistency: WalletScoreItem;
+  risk: WalletScoreItem;
+  copyTrade: WalletScoreItem;
 }
 
 interface WalletClassificationResult {
@@ -235,6 +257,28 @@ function median(values: number[]): number {
   return sorted.length % 2 === 0
     ? (sorted[mid - 1] + sorted[mid]) / 2
     : sorted[mid];
+}
+
+function stdev(values: number[]): number {
+  if (values.length < 2) return 0;
+  const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+  const variance = values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+}
+
+function coefficientOfVariation(values: number[]): number {
+  if (values.length < 2) return 0;
+  const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+  if (mean === 0) return 0;
+  return stdev(values) / mean;
+}
+
+function clampScore(n: number): number {
+  return Math.round(Math.max(0, Math.min(100, n)));
+}
+
+function clamp(n: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, n));
 }
 
 function computeWalletMetrics(trades: DbWalletScanTrade[]): WalletScanMetrics {
@@ -264,6 +308,24 @@ function computeWalletMetrics(trades: DbWalletScanTrade[]): WalletScanMetrics {
   }
   const medianInterTradeMinutes = median(gaps);
 
+  const closedCount = trades.filter(t => t.status === 'closed').length;
+  const openCount = trades.filter(t => t.status === 'open').length;
+  const validClosed = trades.filter(t => t.status === 'closed' && t.entry_price > 0 && t.exit_price != null);
+  const validClosedCount = validClosed.length;
+  const winRate = validClosedCount > 0
+    ? validClosed.filter(t => (t.exit_price as number) > t.entry_price).length / validClosedCount
+    : 0;
+  const avgReturnPct = validClosedCount > 0
+    ? validClosed.reduce((sum, t) => sum + ((t.exit_price as number) - t.entry_price) / t.entry_price * 100, 0) / validClosedCount
+    : 0;
+  const closedRatio = tradeCount > 0 ? closedCount / tradeCount : 0;
+  const totalSol = trades.reduce((sum, t) => sum + (t.sol_amount || t.position_size), 0);
+  const openSol = trades.filter(t => t.status === 'open').reduce((sum, t) => sum + (t.sol_amount || t.position_size), 0);
+  const openSolShare = totalSol > 0 ? openSol / totalSol : 0;
+  const maxSolSize = solSizes.length > 0 ? Math.max(...solSizes) : 0;
+  const gapCv = coefficientOfVariation(gaps);
+  const sizeCv = coefficientOfVariation(solSizes);
+
   return {
     tradeCount,
     uniqueTokens,
@@ -272,6 +334,16 @@ function computeWalletMetrics(trades: DbWalletScanTrade[]): WalletScanMetrics {
     topTokenShare,
     repeatMintCount,
     roundTripMints,
+    closedCount,
+    openCount,
+    validClosedCount,
+    winRate,
+    avgReturnPct,
+    closedRatio,
+    openSolShare,
+    maxSolSize,
+    gapCv,
+    sizeCv,
   };
 }
 
@@ -339,6 +411,119 @@ function classifyWallet(wallet: FavoriteWallet): WalletClassificationResult | nu
     displayLabel: 'Unclassified',
     reason: 'Based on last scan: mixed trading pattern in the last 100 transactions.',
   };
+}
+
+/** Deterministic wallet scores from saved scan data. Returns null if never scanned. */
+function computeWalletScores(wallet: FavoriteWallet): WalletScoresResult | null {
+  if (wallet.last_scanned_at === null) return null;
+
+  const trades = wallet.saved_results ?? [];
+  const insufficient = (reason: string): WalletScoreItem => ({ value: null, reason });
+
+  if (trades.length === 0) {
+    return {
+      alpha: insufficient('Based on last scan: need 3+ closed trades.'),
+      consistency: insufficient('Based on last scan: need 3+ trades.'),
+      risk: insufficient('Based on last scan: no trades in scan window.'),
+      copyTrade: insufficient('Based on last scan: need 3+ closed trades.'),
+    };
+  }
+
+  const m = computeWalletMetrics(trades);
+
+  const alpha: WalletScoreItem = m.validClosedCount >= 3
+    ? {
+        value: clampScore(m.winRate * 55 + clamp(m.avgReturnPct * 1.5, 0, 45)),
+        reason: `Based on last scan: ${Math.round(m.winRate * 100)}% win rate, ${m.avgReturnPct >= 0 ? '+' : ''}${m.avgReturnPct.toFixed(1)}% avg return on ${m.validClosedCount} closed trades.`,
+      }
+    : insufficient('Based on last scan: need 3+ closed trades.');
+
+  const consistency: WalletScoreItem = m.tradeCount >= 3
+    ? {
+        value: clampScore(
+          clamp(100 - m.gapCv * 80, 0, 100) * 0.35 +
+          clamp(100 - m.sizeCv * 80, 0, 100) * 0.35 +
+          m.closedRatio * 100 * 0.30,
+        ),
+        reason: `Based on last scan: steady sizing and timing, ${Math.round(m.closedRatio * 100)}% of trades closed.`,
+      }
+    : insufficient('Based on last scan: need 3+ trades.');
+
+  const risk: WalletScoreItem = m.tradeCount >= 1
+    ? {
+        value: clampScore(
+          m.openSolShare * 35 +
+          clamp(m.maxSolSize / 5 * 25, 0, 25) +
+          clamp(m.uniqueTokens / 8 * 25, 0, 25) +
+          m.topTokenShare * 15,
+        ),
+        reason: `Based on last scan: ${m.maxSolSize.toFixed(1)} SOL max size, ${Math.round(m.openSolShare * 100)}% still open, ${m.uniqueTokens} tokens traded.`,
+      }
+    : insufficient('Based on last scan: no trades in scan window.');
+
+  let copyTrade: WalletScoreItem = insufficient('Based on last scan: need 3+ closed trades.');
+
+  if (alpha.value !== null && consistency.value !== null && risk.value !== null) {
+    const activityScore = clamp(m.tradeCount / 12 * 100, 0, 100);
+    let base =
+      alpha.value * 0.40 +
+      consistency.value * 0.25 +
+      (100 - risk.value) * 0.25 +
+      activityScore * 0.10;
+
+    const penalties: string[] = [];
+    if (m.medianInterTradeMinutes <= 20) {
+      base *= 0.75;
+      penalties.push('fast cadence');
+    }
+    if (m.roundTripMints >= 2 && m.medianInterTradeMinutes <= 30) {
+      base *= 0.70;
+      penalties.push('arb-like churn');
+    }
+    if (alpha.value < 40) {
+      base *= 0.85;
+      penalties.push('low alpha');
+    }
+
+    const penaltyNote = penalties.length > 0 ? ` Adjusted for ${penalties.join(', ')}.` : '';
+    copyTrade = {
+      value: clampScore(base),
+      reason: `Based on last scan: combines alpha, consistency, and inverse risk.${penaltyNote}`,
+    };
+  }
+
+  return { alpha, consistency, risk, copyTrade };
+}
+
+function WalletScoreRow({
+  label,
+  score,
+  barClass,
+}: {
+  label: string;
+  score: WalletScoreItem;
+  barClass: string;
+}) {
+  return (
+    <div title={score.reason}>
+      <div className="flex justify-between items-center text-[10px] mb-1 gap-2">
+        <span className="text-gray-500 truncate">{label}</span>
+        <span className="text-gray-300 font-semibold flex-shrink-0">
+          {score.value !== null ? score.value : '—'}
+        </span>
+      </div>
+      {score.value !== null ? (
+        <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all ${barClass}`}
+            style={{ width: `${score.value}%` }}
+          />
+        </div>
+      ) : (
+        <p className="text-[9px] text-gray-600 leading-snug">{score.reason}</p>
+      )}
+    </div>
+  );
 }
 
 type WalletImportLaunch = {
@@ -4040,6 +4225,7 @@ function WalletLibrary({
                 const classificationStyle = classification
                   ? WALLET_CLASSIFICATION_STYLES[classification.label]
                   : null;
+                const scores = computeWalletScores(wallet);
 
                 return (
                   <div
@@ -4090,6 +4276,16 @@ function WalletLibrary({
                           {classification.displayLabel}
                         </span>
                         <p className="text-[10px] text-gray-600 mt-1.5 leading-relaxed">{classification.reason}</p>
+                      </div>
+                    )}
+
+                    {scores && (
+                      <div className="mb-3 px-3 py-2.5 bg-gray-900/40 border border-gray-800/50 rounded-lg space-y-2.5">
+                        <p className="text-[9px] font-semibold uppercase tracking-widest text-gray-600">Scores (last scan)</p>
+                        <WalletScoreRow label="Alpha" score={scores.alpha} barClass="bg-emerald-500" />
+                        <WalletScoreRow label="Consistency" score={scores.consistency} barClass="bg-cyan-500" />
+                        <WalletScoreRow label="Risk (higher = riskier)" score={scores.risk} barClass="bg-orange-500" />
+                        <WalletScoreRow label="Copy Trade" score={scores.copyTrade} barClass="bg-blue-500" />
                       </div>
                     )}
 
