@@ -159,6 +159,13 @@ const WALLET_SCAN_STATUS_STYLES: Record<WalletScanStatus, { label: string; class
   empty: { label: 'No trades found', className: 'bg-orange-500/15 text-orange-400 border-orange-500/25' },
 };
 
+type WalletImportLaunch = {
+  mode: 'open' | 'rescan';
+  wallet_address: string;
+  nickname?: string;
+  saved_results?: DbWalletScanTrade[] | null;
+};
+
 const STORAGE_KEYS = {
   TRADES: 'narrative_trades',
   WALLETS: 'narrative_wallets',
@@ -201,6 +208,8 @@ function App() {
   const [dataLoading, setDataLoading] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [walletImportLaunch, setWalletImportLaunch] = useState<WalletImportLaunch | null>(null);
+  const [walletImportLaunchKey, setWalletImportLaunchKey] = useState(0);
 
   // ── subscribe to auth changes ───────────────────────────────────────────────
   useEffect(() => {
@@ -248,6 +257,12 @@ function App() {
       setWatchlist([]);
     }
   }, [user, session, loadUserData]);
+
+  useEffect(() => {
+    if (activeTab !== 'import') {
+      setWalletImportLaunch(null);
+    }
+  }, [activeTab]);
 
   // ── logout ──────────────────────────────────────────────────────────────────
   const handleLogout = async () => {
@@ -408,6 +423,35 @@ function App() {
       return [normalized, ...prev];
     });
     return normalized;
+  };
+
+  const handleLibraryOpenWallet = (wallet: FavoriteWallet) => {
+    setWalletImportLaunch({
+      mode: 'open',
+      wallet_address: wallet.wallet_address,
+      nickname: wallet.nickname,
+      saved_results: wallet.saved_results,
+    });
+    setWalletImportLaunchKey(k => k + 1);
+    setActiveTab('import');
+  };
+
+  const handleLibraryRescanWallet = (wallet: FavoriteWallet) => {
+    setWalletImportLaunch({
+      mode: 'rescan',
+      wallet_address: wallet.wallet_address,
+      nickname: wallet.nickname,
+    });
+    setWalletImportLaunchKey(k => k + 1);
+    setActiveTab('import');
+  };
+
+  const handleWalletScanComplete = async (payload: {
+    wallet_address: string;
+    saved_results: DbWalletScanTrade[];
+    nickname?: string;
+  }) => {
+    await handleUpsertWalletScan(payload);
   };
 
   const handleDeleteWallet = async (id: string) => {
@@ -583,8 +627,8 @@ function App() {
                     wallets={wallets}
                     onAdd={handleAddWallet}
                     onDelete={handleDeleteWallet}
-                    onOpen={() => {}}
-                    onRescan={() => {}}
+                    onOpen={handleLibraryOpenWallet}
+                    onRescan={handleLibraryRescanWallet}
                   />
                 )}
                 {activeTab === 'journal' && (
@@ -600,6 +644,10 @@ function App() {
                       setActiveTab('history');
                     }}
                     onCancel={() => setActiveTab('dashboard')}
+                    walletLaunch={walletImportLaunch}
+                    walletLaunchKey={walletImportLaunchKey}
+                    onWalletLaunchConsumed={() => setWalletImportLaunch(null)}
+                    onScanComplete={handleWalletScanComplete}
                   />
                 )}
               </>
@@ -3587,18 +3635,6 @@ function WalletLibrary({
   onRescan: (wallet: FavoriteWallet) => void;
 }) {
   const [newWallet, setNewWallet] = useState({ wallet_address: '', nickname: '', notes: '' });
-  const [phase4Banner, setPhase4Banner] = useState<string | null>(null);
-  const bannerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const showPhase4Banner = (action: 'open' | 'rescan') => {
-    if (bannerTimeoutRef.current) clearTimeout(bannerTimeoutRef.current);
-    setPhase4Banner(`${action === 'open' ? 'Open' : 'Re-scan'} navigation is coming in Phase 4.`);
-    bannerTimeoutRef.current = setTimeout(() => setPhase4Banner(null), 4000);
-  };
-
-  useEffect(() => () => {
-    if (bannerTimeoutRef.current) clearTimeout(bannerTimeoutRef.current);
-  }, []);
 
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault();
@@ -3610,26 +3646,8 @@ function WalletLibrary({
     setNewWallet({ wallet_address: '', nickname: '', notes: '' });
   };
 
-  const handleOpen = (wallet: FavoriteWallet) => {
-    if (wallet.last_scanned_at === null) return;
-    onOpen(wallet);
-    showPhase4Banner('open');
-  };
-
-  const handleRescan = (wallet: FavoriteWallet) => {
-    onRescan(wallet);
-    showPhase4Banner('rescan');
-  };
-
   return (
     <div className="space-y-6">
-      {phase4Banner && (
-        <div className="flex items-start gap-3 px-4 py-3 bg-cyan-500/8 border border-cyan-500/20 rounded-xl">
-          <ClockIcon className="w-4 h-4 text-cyan-400 flex-shrink-0 mt-0.5" />
-          <p className="text-xs text-cyan-300/90 leading-relaxed">{phase4Banner}</p>
-        </div>
-      )}
-
       <div className="bg-[#12141a]/90 backdrop-blur border border-gray-800/60 rounded-2xl p-6 sm:p-8">
         <div className="flex items-center gap-3 mb-6">
           <div className="w-10 h-10 rounded-lg bg-cyan-500/20 flex items-center justify-center">
@@ -3726,7 +3744,7 @@ function WalletLibrary({
                 <div className="flex gap-2 mt-auto pt-1">
                   <button
                     type="button"
-                    onClick={() => handleOpen(wallet)}
+                    onClick={() => onOpen(wallet)}
                     disabled={!canOpen}
                     title={canOpen ? 'Open saved scan results' : 'Scan this wallet in Import Trades first'}
                     className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-gray-800/60 border border-gray-700/50 text-gray-300 rounded-lg text-xs font-semibold hover:bg-gray-800 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-gray-800/60 disabled:hover:text-gray-300 transition-colors"
@@ -3736,7 +3754,7 @@ function WalletLibrary({
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleRescan(wallet)}
+                    onClick={() => onRescan(wallet)}
                     className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-gray-800/60 border border-gray-700/50 text-gray-300 rounded-lg text-xs font-semibold hover:bg-gray-800 hover:text-cyan-300 transition-colors"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
@@ -3831,11 +3849,37 @@ function parseCsvText(text: string): ParsedImportTrade[] {
   }).filter(t => t.token_name);
 }
 
-function ImportTrades({ onImport, onCancel }: {
+function ImportTrades({
+  onImport,
+  onCancel,
+  walletLaunch,
+  walletLaunchKey = 0,
+  onWalletLaunchConsumed,
+  onScanComplete,
+}: {
   onImport: (trades: Array<Omit<Trade, 'id' | 'created_at' | 'pnl' | 'rr_ratio'>>) => void;
   onCancel: () => void;
+  walletLaunch?: WalletImportLaunch | null;
+  walletLaunchKey?: number;
+  onWalletLaunchConsumed?: () => void;
+  onScanComplete?: (payload: {
+    wallet_address: string;
+    saved_results: DbWalletScanTrade[];
+    nickname?: string;
+  }) => void;
 }) {
   const [method, setMethod] = useState<ImportMethod | null>(null);
+
+  useEffect(() => {
+    if (walletLaunch) {
+      setMethod('wallet');
+    }
+  }, [walletLaunch, walletLaunchKey]);
+
+  const handleBackToOptions = () => {
+    setMethod(null);
+    onWalletLaunchConsumed?.();
+  };
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
@@ -3866,14 +3910,23 @@ function ImportTrades({ onImport, onCancel }: {
       ) : (
         <>
           <button
-            onClick={() => setMethod(null)}
+            onClick={handleBackToOptions}
             className="flex items-center gap-2 text-xs text-gray-500 hover:text-gray-300 transition-colors"
           >
             <ArrowRight className="w-3.5 h-3.5 rotate-180" />
             Back to import options
           </button>
           {method === 'csv' && <CsvImport onImport={onImport} />}
-          {method === 'wallet' && <WalletImport onImport={onImport} />}
+          {method === 'wallet' && (
+            <WalletImport
+              key={`wallet-import-${walletLaunchKey}`}
+              onImport={onImport}
+              launch={walletLaunch ?? null}
+              launchKey={walletLaunchKey}
+              onLaunchConsumed={onWalletLaunchConsumed}
+              onScanComplete={onScanComplete}
+            />
+          )}
           {method === 'manual' && <ManualImport onImport={onImport} />}
         </>
       )}
@@ -4285,7 +4338,23 @@ interface ApiHealthState {
   birdeye: { status: ApiStatus; latency_ms?: number; error?: string; configured: boolean };
 }
 
-function WalletImport({ onImport }: { onImport: (trades: Array<Omit<Trade, 'id' | 'created_at' | 'pnl' | 'rr_ratio'>>) => void }) {
+function WalletImport({
+  onImport,
+  launch = null,
+  launchKey = 0,
+  onLaunchConsumed,
+  onScanComplete,
+}: {
+  onImport: (trades: Array<Omit<Trade, 'id' | 'created_at' | 'pnl' | 'rr_ratio'>>) => void;
+  launch?: WalletImportLaunch | null;
+  launchKey?: number;
+  onLaunchConsumed?: () => void;
+  onScanComplete?: (payload: {
+    wallet_address: string;
+    saved_results: DbWalletScanTrade[];
+    nickname?: string;
+  }) => void;
+}) {
   const [address, setAddress] = useState('');
   const [validationError, setValidationError] = useState('');
   const [status, setStatus] = useState<ScanStatus>('idle');
@@ -4297,6 +4366,8 @@ function WalletImport({ onImport }: { onImport: (trades: Array<Omit<Trade, 'id' 
     helius: { status: 'checking', configured: false },
     birdeye: { status: 'checking', configured: false },
   });
+  const launchNicknameRef = useRef<string | undefined>(undefined);
+  const launchAppliedRef = useRef<number | null>(null);
 
   useEffect(() => {
     const check = async () => {
@@ -4341,8 +4412,8 @@ function WalletImport({ onImport }: { onImport: (trades: Array<Omit<Trade, 'id' 
     if (validationError && val.trim()) setValidationError('');
   };
 
-  const handleScan = async () => {
-    const trimmed = address.trim();
+  const handleScan = async (overrideAddress?: string) => {
+    const trimmed = (overrideAddress ?? address).trim();
     if (!trimmed) return;
 
     if (!isValidSolanaAddress(trimmed)) {
@@ -4411,11 +4482,19 @@ function WalletImport({ onImport }: { onImport: (trades: Array<Omit<Trade, 'id' 
 
       await new Promise(r => setTimeout(r, 200));
 
+      const scanPayload = {
+        wallet_address: trimmed,
+        saved_results: trades as DbWalletScanTrade[],
+        nickname: launchNicknameRef.current,
+      };
+
       if (trades.length === 0) {
         setStatus('empty');
+        onScanComplete?.(scanPayload);
       } else {
         setResults(trades);
         setStatus('found');
+        onScanComplete?.(scanPayload);
       }
     } catch (err) {
       setScanStep(0);
@@ -4423,6 +4502,42 @@ function WalletImport({ onImport }: { onImport: (trades: Array<Omit<Trade, 'id' 
       setStatus('error');
     }
   };
+
+  useEffect(() => {
+    if (!launch || launchAppliedRef.current === launchKey) return;
+    launchAppliedRef.current = launchKey;
+    launchNicknameRef.current = launch.nickname;
+
+    const trimmed = launch.wallet_address.trim();
+    setAddress(trimmed);
+    setValidationError('');
+    setErrorMessage('');
+    setDebugData(null);
+    setImporting(false);
+    setDone(false);
+
+    if (launch.mode === 'open') {
+      const hydrated: WalletTradeResult[] = (launch.saved_results ?? []).map(r => ({
+        ...r,
+        selected: r.selected ?? true,
+        mock: r.mock ?? false,
+      }));
+      setResults(hydrated);
+      setStatus(hydrated.length > 0 ? 'found' : 'empty');
+      setScanStep(0);
+      onLaunchConsumed?.();
+      return;
+    }
+
+    setResults([]);
+    setStatus('idle');
+    setScanStep(0);
+    onLaunchConsumed?.();
+
+    if (trimmed && isValidSolanaAddress(trimmed)) {
+      void handleScan(trimmed);
+    }
+  }, [launch, launchKey, onLaunchConsumed]);
 
   const toggleRow = (id: string) =>
     setResults(prev => prev.map(r => r.id === id ? { ...r, selected: !r.selected } : r));
@@ -4548,7 +4663,7 @@ function WalletImport({ onImport }: { onImport: (trades: Array<Omit<Trade, 'id' 
                 type="text"
                 value={address}
                 onChange={e => handleAddressChange(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && address.trim() && handleScan()}
+                onKeyDown={e => e.key === 'Enter' && address.trim() && void handleScan()}
                 placeholder="e.g. 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgA"
                 className={`w-full bg-gray-900/60 border rounded-xl pl-11 pr-4 py-3.5 text-sm text-white placeholder-gray-600 font-mono focus:outline-none transition-all ${
                   validationError
@@ -4570,7 +4685,7 @@ function WalletImport({ onImport }: { onImport: (trades: Array<Omit<Trade, 'id' 
             )}
           </div>
           <button
-            onClick={handleScan}
+            onClick={() => void handleScan()}
             disabled={!address.trim()}
             className="w-full py-3 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-xl text-sm font-bold hover:from-cyan-400 hover:to-blue-400 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-lg shadow-cyan-500/20 flex items-center justify-center gap-2"
           >
