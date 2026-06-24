@@ -48,12 +48,15 @@ export type DbWalletScanTrade = {
   mock: boolean;
 };
 
+export type WalletRole = 'my' | 'tracked';
+
 export type DbWallet = {
   id: string;
   user_id: string;
   wallet_address: string;
   nickname: string;
   notes: string | null;
+  wallet_type: WalletRole;
   last_scanned_at: string | null;
   trade_count: number;
   saved_results: DbWalletScanTrade[] | null;

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import type { User, Session } from '@supabase/supabase-js';
 import { supabase } from './supabase';
-import type { DbWalletScanTrade } from './supabase';
+import type { DbWalletScanTrade, WalletRole } from './supabase';
 import {
   TrendingUp,
   TrendingDown,
@@ -105,10 +105,19 @@ interface FavoriteWallet {
   wallet_address: string;
   nickname: string;
   notes: string | null;
+  wallet_type: WalletRole;
   last_scanned_at: string | null;
   trade_count: number;
   saved_results: DbWalletScanTrade[] | null;
   created_at: string;
+}
+
+type NewFavoriteWallet = Omit<FavoriteWallet, 'id' | 'created_at' | 'wallet_type'> & {
+  wallet_type?: WalletRole;
+};
+
+function normalizeWalletRole(value: unknown): WalletRole {
+  return value === 'my' ? 'my' : 'tracked';
 }
 
 function normalizeFavoriteWallet(row: Partial<FavoriteWallet>): FavoriteWallet {
@@ -117,11 +126,20 @@ function normalizeFavoriteWallet(row: Partial<FavoriteWallet>): FavoriteWallet {
     wallet_address: row.wallet_address ?? '',
     nickname: row.nickname ?? '',
     notes: row.notes ?? null,
+    wallet_type: normalizeWalletRole(row.wallet_type),
     last_scanned_at: row.last_scanned_at ?? null,
     trade_count: row.trade_count ?? 0,
     saved_results: row.saved_results ?? null,
     created_at: row.created_at ?? new Date().toISOString(),
   };
+}
+
+function getMyWallet(wallets: FavoriteWallet[]): FavoriteWallet | null {
+  return wallets.find(w => w.wallet_type === 'my') ?? null;
+}
+
+function getTrackedWallets(wallets: FavoriteWallet[]): FavoriteWallet[] {
+  return wallets.filter(w => w.wallet_type === 'tracked');
 }
 
 type WalletScanStatus = 'not_scanned' | 'ready' | 'empty';
@@ -568,11 +586,14 @@ function App() {
   const [user, setUser] = useState<User | null>(null);
 
   // ── app state ───────────────────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'add' | 'history' | 'analytics' | 'wallets' | 'journal' | 'import'>('dashboard');
+  type AppTab = 'dashboard' | 'add' | 'history' | 'analytics' | 'wallets' | 'journal' | 'import';
+  const [activeTab, setActiveTab] = useState<AppTab>('dashboard');
+  const [visitedTabs, setVisitedTabs] = useState<Set<AppTab>>(() => new Set(['dashboard']));
   const [trades, setTrades] = useState<Trade[]>([]);
   const [wallets, setWallets] = useState<FavoriteWallet[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
+  const [hasInitialDataLoaded, setHasInitialDataLoaded] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [walletImportLaunch, setWalletImportLaunch] = useState<WalletImportLaunch | null>(null);
@@ -612,6 +633,7 @@ function App() {
       setWatchlist(loadLocalWatchlist());
     } finally {
       setDataLoading(false);
+      setHasInitialDataLoaded(true);
     }
   }, []);
 
@@ -622,13 +644,12 @@ function App() {
       setTrades([]);
       setWallets([]);
       setWatchlist([]);
+      setHasInitialDataLoaded(false);
     }
   }, [user, session, loadUserData]);
 
   useEffect(() => {
-    if (activeTab !== 'import') {
-      setWalletImportLaunch(null);
-    }
+    setVisitedTabs(prev => (prev.has(activeTab) ? prev : new Set(prev).add(activeTab)));
   }, [activeTab]);
 
   // ── logout ──────────────────────────────────────────────────────────────────
@@ -706,7 +727,7 @@ function App() {
   };
 
   // ── wallet CRUD ─────────────────────────────────────────────────────────────
-  const handleAddWallet = async (wallet: Omit<FavoriteWallet, 'id' | 'created_at'>): Promise<boolean> => {
+  const handleAddWallet = async (wallet: NewFavoriteWallet): Promise<boolean> => {
     if (!user) return false;
     const { data, error } = await supabase
       .from('favorite_wallets')
@@ -714,6 +735,7 @@ function App() {
         wallet_address: wallet.wallet_address.trim(),
         nickname: wallet.nickname.trim(),
         notes: wallet.notes,
+        wallet_type: wallet.wallet_type ?? 'tracked',
         user_id: user.id,
         last_scanned_at: wallet.last_scanned_at ?? null,
         trade_count: wallet.trade_count ?? 0,
@@ -777,6 +799,7 @@ function App() {
           wallet_address: trimmed,
           nickname: payload.nickname ?? existing?.nickname ?? `${trimmed.slice(0, 4)}…${trimmed.slice(-4)}`,
           notes: existing?.notes ?? null,
+          wallet_type: existing?.wallet_type ?? 'tracked',
           last_scanned_at,
           trade_count,
           saved_results: payload.saved_results,
@@ -877,7 +900,7 @@ function App() {
     return <AuthPage />;
   }
 
-  const loading = dataLoading;
+  const showInitialLoader = !hasInitialDataLoaded && dataLoading;
 
   return (
     <div className="min-h-screen bg-[#0a0c10] text-gray-100 font-mono flex">
@@ -961,43 +984,47 @@ function App() {
 
         {/* Page content */}
         <main className="flex-1 overflow-auto">
-          <div className="p-4 sm:p-6 pb-16">
-            {loading ? (
-              <LoadingState />
-            ) : (
-              <>
-                {activeTab === 'dashboard' && (
+          <div className="relative p-4 sm:p-6 pb-16">
+            {showInitialLoader && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#0a0c10]/85 backdrop-blur-sm">
+                <LoadingState />
+              </div>
+            )}
+            <>
+              {visitedTabs.has('dashboard') && (
+                <div hidden={activeTab !== 'dashboard'} aria-hidden={activeTab !== 'dashboard'}>
                   <Dashboard
-                    openTrades={openTrades}
-                    closedTrades={closedTrades}
-                    winRate={winRate}
-                    totalPnL={totalPnL}
-                    avgRR={avgRR}
-                    onCloseTrade={handleCloseTrade}
-                    onDeleteTrade={handleDeleteTrade}
+                    wallets={wallets}
                     trades={trades}
-                    watchlist={watchlist}
-                    onAddWatchlist={handleAddWatchlistItem}
-                    onDeleteWatchlist={handleDeleteWatchlistItem}
-                    onLogTrade={() => setActiveTab('add')}
-                    onImport={() => setActiveTab('import')}
+                    openTrades={openTrades}
+                    winRate={winRate}
+                    onConnectWallet={() => setActiveTab('wallets')}
+                    onViewWallets={() => setActiveTab('wallets')}
+                    onViewHistory={() => setActiveTab('history')}
+                    onViewAnalytics={() => setActiveTab('analytics')}
                   />
-                )}
-                {activeTab === 'add' && (
+                </div>
+              )}
+              {visitedTabs.has('add') && (
+                <div hidden={activeTab !== 'add'} aria-hidden={activeTab !== 'add'}>
                   <AddTradeForm
                     onSubmit={handleAddTrade}
                     onCancel={() => setActiveTab('dashboard')}
                   />
-                )}
-                {activeTab === 'history' && (
+                </div>
+              )}
+              {visitedTabs.has('history') && (
+                <div hidden={activeTab !== 'history'} aria-hidden={activeTab !== 'history'}>
                   <TradeHistory
                     trades={trades}
                     onCloseTrade={handleCloseTrade}
                     onDeleteTrade={handleDeleteTrade}
                     onUpdateTrade={handleUpdateTrade}
                   />
-                )}
-                {activeTab === 'analytics' && (
+                </div>
+              )}
+              {visitedTabs.has('analytics') && (
+                <div hidden={activeTab !== 'analytics'} aria-hidden={activeTab !== 'analytics'}>
                   <Analytics
                     trades={trades}
                     closedTrades={closedTrades}
@@ -1005,8 +1032,10 @@ function App() {
                     totalPnL={totalPnL}
                     avgRR={avgRR}
                   />
-                )}
-                {activeTab === 'wallets' && (
+                </div>
+              )}
+              {visitedTabs.has('wallets') && (
+                <div hidden={activeTab !== 'wallets'} aria-hidden={activeTab !== 'wallets'}>
                   <WalletLibrary
                     wallets={wallets}
                     onAdd={handleAddWallet}
@@ -1015,14 +1044,18 @@ function App() {
                     onOpen={handleLibraryOpenWallet}
                     onRescan={handleLibraryRescanWallet}
                   />
-                )}
-                {activeTab === 'journal' && (
+                </div>
+              )}
+              {visitedTabs.has('journal') && (
+                <div hidden={activeTab !== 'journal'} aria-hidden={activeTab !== 'journal'}>
                   <QuickJournal
                     onSaveTrade={handleAddTrade}
                     onCancel={() => setActiveTab('dashboard')}
                   />
-                )}
-                {activeTab === 'import' && (
+                </div>
+              )}
+              {visitedTabs.has('import') && (
+                <div hidden={activeTab !== 'import'} aria-hidden={activeTab !== 'import'}>
                   <ImportTrades
                     onImport={(trades) => {
                       trades.forEach(t => handleAddTrade(t));
@@ -1034,9 +1067,9 @@ function App() {
                     onWalletLaunchConsumed={() => setWalletImportLaunch(null)}
                     onScanComplete={handleWalletScanComplete}
                   />
-                )}
-              </>
-            )}
+                </div>
+              )}
+            </>
           </div>
         </main>
       </div>
@@ -1357,45 +1390,66 @@ function Sidebar({ activeTab, setActiveTab, collapsed, onToggleCollapse, mobileO
   );
 }
 
-function Dashboard({ openTrades, closedTrades, winRate, totalPnL, avgRR, onCloseTrade, onDeleteTrade, trades, watchlist, onAddWatchlist, onDeleteWatchlist, onLogTrade, onImport }) {
-  const recentTrades = [...trades].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).slice(0, 10);
-  const isEmpty = trades.length === 0;
+function Dashboard({
+  wallets,
+  trades,
+  openTrades,
+  winRate,
+  onConnectWallet,
+  onViewWallets,
+  onViewHistory,
+  onViewAnalytics,
+}: {
+  wallets: FavoriteWallet[];
+  trades: Trade[];
+  openTrades: Trade[];
+  winRate: string;
+  onConnectWallet: () => void;
+  onViewWallets: () => void;
+  onViewHistory: () => void;
+  onViewAnalytics: () => void;
+}) {
+  const hasWallets = wallets.length > 0;
+  const winRatePositive = parseFloat(winRate) >= 50;
 
-  return (
-    <div className="space-y-5">
-      {isEmpty ? (
-        /* ── Empty state ── */
-        <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-4">
+  const recentWallets = [...wallets]
+    .sort((a, b) => {
+      if (!a.last_scanned_at && !b.last_scanned_at) return 0;
+      if (!a.last_scanned_at) return 1;
+      if (!b.last_scanned_at) return -1;
+      return new Date(b.last_scanned_at).getTime() - new Date(a.last_scanned_at).getTime();
+    })
+    .slice(0, 5);
+
+  if (!hasWallets) {
+    return (
+      <div className="space-y-5">
+        <div className="flex flex-col items-center justify-center min-h-[50vh] text-center px-4">
           <div className="relative mb-8">
-            <div className="w-24 h-24 rounded-2xl bg-gradient-to-br from-emerald-500/20 to-cyan-500/15 border border-emerald-500/20 flex items-center justify-center mx-auto shadow-xl shadow-emerald-500/10">
-              <LineChart className="w-12 h-12 text-emerald-400" />
-            </div>
-            <div className="absolute -top-1 -right-1 w-6 h-6 rounded-full bg-emerald-400/20 border border-emerald-400/40 flex items-center justify-center">
-              <span className="text-emerald-400 text-xs font-bold">+</span>
+            <div className="w-24 h-24 rounded-2xl bg-gradient-to-br from-cyan-500/20 to-teal-500/15 border border-cyan-500/20 flex items-center justify-center mx-auto shadow-xl shadow-cyan-500/10">
+              <Wallet className="w-12 h-12 text-cyan-400" />
             </div>
           </div>
 
-          <h2 className="text-2xl font-bold text-white mb-2">Start tracking your trades</h2>
-          <p className="text-gray-500 text-sm max-w-md mb-8 leading-relaxed">
-            Log your Solana meme coin trades to track win rate, P&L, and setup performance over time.
+          <h2 className="text-2xl font-bold text-white mb-2">Welcome to Narrative</h2>
+          <p className="text-gray-500 text-sm max-w-lg mb-8 leading-relaxed">
+            Connect a wallet to automatically import your trading history and unlock analytics, journaling, and performance tracking.
           </p>
 
-          <div className="flex flex-col sm:flex-row items-center gap-3 mb-10">
-            <button
-              onClick={onLogTrade}
-              className="flex items-center gap-2.5 px-6 py-3 bg-gradient-to-r from-emerald-500 to-teal-500 text-white rounded-xl text-sm font-bold hover:from-emerald-400 hover:to-teal-400 transition-all shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 hover:scale-105"
-            >
-              <PlusCircle className="w-5 h-5" />
-              Log Your First Trade
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={onConnectWallet}
+            className="flex items-center gap-2.5 px-6 py-3 bg-gradient-to-r from-cyan-500 to-teal-500 text-white rounded-xl text-sm font-bold hover:from-cyan-400 hover:to-teal-400 transition-all shadow-lg shadow-cyan-500/25 hover:shadow-cyan-500/40 hover:scale-105 mb-10"
+          >
+            <Wallet className="w-5 h-5" />
+            Connect Your First Wallet
+          </button>
 
-          {/* Feature grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-2xl w-full">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-3xl w-full">
             {[
-              { icon: TrendingUp, color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20', title: 'Track P&L', desc: 'See win rate, avg R:R, and cumulative returns' },
-              { icon: BarChart3, color: 'text-blue-400', bg: 'bg-blue-500/10 border-blue-500/20', title: 'Setup Analytics', desc: 'Discover which setups perform best for you' },
-              { icon: History, color: 'text-orange-400', bg: 'bg-orange-500/10 border-orange-500/20', title: 'Trade Journal', desc: 'Log entries, exits, notes, and screenshots' },
+              { icon: Download, color: 'text-cyan-400', bg: 'bg-cyan-500/10 border-cyan-500/20', title: 'Automatic Trade Import', desc: 'Import your trading history directly from your wallet.' },
+              { icon: BarChart3, color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20', title: 'Performance Analytics', desc: 'Track win rate, setups, wallet scores, and trading patterns.' },
+              { icon: BookOpen, color: 'text-orange-400', bg: 'bg-orange-500/10 border-orange-500/20', title: 'Trade Journal', desc: 'Review trades and add notes when needed.' },
             ].map(({ icon: Icon, color, bg, title, desc }) => (
               <div key={title} className={`border rounded-xl p-4 text-left ${bg}`}>
                 <Icon className={`w-5 h-5 ${color} mb-3`} />
@@ -1405,117 +1459,124 @@ function Dashboard({ openTrades, closedTrades, winRate, totalPnL, avgRR, onClose
             ))}
           </div>
         </div>
-      ) : (
-        <>
-          {/* Stats row */}
-          <StatsCards
-            openCount={openTrades.length}
-            closedCount={closedTrades.length}
-            winRate={winRate}
-            totalPnL={totalPnL}
-            avgRR={avgRR}
-          />
+      </div>
+    );
+  }
 
-          {/* Main terminal grid — full width left, compact right panel */}
-          <div className="grid grid-cols-1 xl:grid-cols-[1fr_280px] gap-5">
-            {/* Left: positions + closed — takes all available space */}
-            <div className="space-y-5 min-w-0">
-              {/* Open Positions */}
-              <section>
-                <div className="flex items-center justify-between mb-3">
-                  <h2 className="text-xs font-semibold uppercase tracking-widest text-cyan-400 flex items-center gap-2">
-                    <span className="w-2 h-2 bg-cyan-400 rounded-full animate-pulse" />
-                    Open Positions
-                    <span className="bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 text-[10px] px-2 py-0.5 rounded-full font-bold">{openTrades.length}</span>
-                  </h2>
-                  {openTrades.length === 0 && (
-                    <button
-                      onClick={onLogTrade}
-                      className="flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300 transition-colors font-medium"
-                    >
-                      <PlusCircle className="w-3.5 h-3.5" />
-                      Open a position
-                    </button>
-                  )}
-                </div>
-                {openTrades.length === 0 ? (
-                  <div className="bg-[#12141a]/40 border border-dashed border-gray-800/60 rounded-xl p-6 text-center">
-                    <p className="text-gray-600 text-sm">No open positions — ready to enter a trade?</p>
-                  </div>
-                ) : (
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-2 2xl:grid-cols-3">
-                    {openTrades.map((trade) => (
-                      <TradeCard key={trade.id} trade={trade} onClose={onCloseTrade} onDelete={onDeleteTrade} />
-                    ))}
-                  </div>
-                )}
-              </section>
-
-              {/* Closed Trades */}
-              <section>
-                <div className="flex items-center justify-between mb-3">
-                  <h2 className="text-xs font-semibold uppercase tracking-widest text-gray-500 flex items-center gap-2">
-                    <Target className="w-3.5 h-3.5 text-emerald-500" />
-                    Recent Closed Trades
-                    <span className="bg-gray-800/60 text-gray-500 border border-gray-700/50 text-[10px] px-2 py-0.5 rounded-full font-bold">{closedTrades.length}</span>
-                  </h2>
-                </div>
-                {closedTrades.length === 0 ? (
-                  <div className="bg-[#12141a]/60 border border-dashed border-gray-800/60 rounded-xl overflow-hidden">
-                    <div className="flex items-start gap-3 px-5 pt-5 pb-4">
-                      <div className="w-8 h-8 rounded-lg bg-gray-800/80 border border-gray-700/50 flex items-center justify-center flex-shrink-0 mt-0.5">
-                        <Target className="w-4 h-4 text-gray-600" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-semibold text-gray-400">No closed trades yet</p>
-                        <p className="text-xs text-gray-600 mt-0.5 leading-relaxed">
-                          Close a position or import your wallet history to start building your performance record.
-                        </p>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 px-4 pb-4">
-                      <button
-                        onClick={onImport}
-                        className="group flex items-center gap-2.5 px-4 py-3 bg-cyan-500/8 border border-cyan-500/20 rounded-xl hover:bg-cyan-500/12 hover:border-cyan-500/35 transition-all text-left"
-                      >
-                        <Download className="w-4 h-4 text-cyan-400 flex-shrink-0" />
-                        <div>
-                          <p className="text-xs font-semibold text-cyan-400">Import Wallet</p>
-                          <p className="text-[10px] text-gray-600">Scan a Solana wallet for past swaps</p>
-                        </div>
-                        <ArrowRight className="w-3.5 h-3.5 text-cyan-700 group-hover:text-cyan-500 group-hover:translate-x-0.5 transition-all ml-auto flex-shrink-0" />
-                      </button>
-                      <button
-                        onClick={onLogTrade}
-                        className="group flex items-center gap-2.5 px-4 py-3 bg-emerald-500/8 border border-emerald-500/20 rounded-xl hover:bg-emerald-500/12 hover:border-emerald-500/35 transition-all text-left"
-                      >
-                        <PlusCircle className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-                        <div>
-                          <p className="text-xs font-semibold text-emerald-400">Log a Trade</p>
-                          <p className="text-[10px] text-gray-600">Enter an entry and exit manually</p>
-                        </div>
-                        <ArrowRight className="w-3.5 h-3.5 text-emerald-700 group-hover:text-emerald-500 group-hover:translate-x-0.5 transition-all ml-auto flex-shrink-0" />
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-2 2xl:grid-cols-3">
-                    {closedTrades.slice(0, 6).map((trade) => (
-                      <TradeCard key={trade.id} trade={trade} onClose={onCloseTrade} onDelete={onDeleteTrade} />
-                    ))}
-                  </div>
-                )}
-              </section>
+  return (
+    <div className="space-y-6">
+      {/* Top summary cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="relative overflow-hidden bg-[#12141a]/80 border border-gray-800/50 rounded-xl p-4 hover:border-cyan-500/20 transition-all duration-300 group">
+          <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/8 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+          <div className="relative">
+            <div className="flex items-center justify-between mb-2.5">
+              <span className="text-[10px] text-gray-500 uppercase tracking-widest font-semibold">Tracked Wallets</span>
+              <div className="w-6 h-6 rounded-md bg-cyan-500/15 flex items-center justify-center">
+                <Wallet className="w-3 h-3 text-cyan-400" />
+              </div>
             </div>
-
-            {/* Right panel: activity + watchlist */}
-            <div className="space-y-4 min-w-0">
-              <RecentActivityPanel trades={recentTrades} onLogTrade={onLogTrade} />
-              <WatchlistPanel watchlist={watchlist} onAdd={onAddWatchlist} onDelete={onDeleteWatchlist} />
-            </div>
+            <p className="text-3xl font-bold text-cyan-400 leading-none">{wallets.length}</p>
           </div>
-        </>
-      )}
+        </div>
+
+        <div className="relative overflow-hidden bg-[#12141a]/80 border border-gray-800/50 rounded-xl p-4 hover:border-emerald-500/20 transition-all duration-300 group">
+          <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/8 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+          <div className="relative">
+            <div className="flex items-center justify-between mb-2.5">
+              <span className="text-[10px] text-gray-500 uppercase tracking-widest font-semibold">Total Trades</span>
+              <div className="w-6 h-6 rounded-md bg-emerald-500/15 flex items-center justify-center">
+                <History className="w-3 h-3 text-emerald-400" />
+              </div>
+            </div>
+            <p className="text-3xl font-bold text-emerald-400 leading-none">{trades.length}</p>
+          </div>
+        </div>
+
+        <div className="relative overflow-hidden bg-[#12141a]/80 border border-gray-800/50 rounded-xl p-4 hover:border-cyan-500/20 transition-all duration-300 group">
+          <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/8 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+          <div className="relative">
+            <div className="flex items-center justify-between mb-2.5">
+              <span className="text-[10px] text-gray-500 uppercase tracking-widest font-semibold">Open Positions</span>
+              <div className="w-6 h-6 rounded-md bg-cyan-500/15 flex items-center justify-center">
+                <AlertCircle className="w-3 h-3 text-cyan-400" />
+              </div>
+            </div>
+            <p className="text-3xl font-bold text-cyan-400 leading-none">{openTrades.length}</p>
+          </div>
+        </div>
+
+        <div className={`relative overflow-hidden bg-[#12141a]/80 border border-gray-800/50 rounded-xl p-4 transition-all duration-300 group ${winRatePositive ? 'hover:border-emerald-500/20' : 'hover:border-red-500/20'}`}>
+          <div className={`absolute inset-0 bg-gradient-to-br to-transparent opacity-0 group-hover:opacity-100 transition-opacity ${winRatePositive ? 'from-emerald-500/8' : 'from-red-500/8'}`} />
+          <div className="relative">
+            <div className="flex items-center justify-between mb-2.5">
+              <span className="text-[10px] text-gray-500 uppercase tracking-widest font-semibold">Win Rate</span>
+              <div className={`w-6 h-6 rounded-md flex items-center justify-center ${winRatePositive ? 'bg-emerald-500/15' : 'bg-red-500/15'}`}>
+                <TrendingUp className={`w-3 h-3 ${winRatePositive ? 'text-emerald-400' : 'text-red-400'}`} />
+              </div>
+            </div>
+            <p className={`text-3xl font-bold leading-none ${winRatePositive ? 'text-emerald-400' : 'text-red-400'}`}>{winRate}%</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Recent wallet activity */}
+      <section className="bg-[#12141a]/80 border border-gray-800/50 rounded-xl overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800/50">
+          <h2 className="text-xs font-semibold uppercase tracking-widest text-gray-400 flex items-center gap-2">
+            <Activity className="w-3.5 h-3.5 text-cyan-400" />
+            Recent Wallet Activity
+          </h2>
+        </div>
+        <div className="divide-y divide-gray-800/40">
+          {recentWallets.map((wallet) => (
+            <div key={wallet.id} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-gray-800/20 transition-colors">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-white truncate">{wallet.nickname}</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {wallet.last_scanned_at
+                    ? `Last scanned ${formatRelativeScanTime(wallet.last_scanned_at)}`
+                    : 'Never scanned'}
+                </p>
+              </div>
+              <p className="text-xs text-gray-400 flex-shrink-0">
+                {wallet.trade_count} trade{wallet.trade_count !== 1 ? 's' : ''}
+              </p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* Quick actions */}
+      <section>
+        <h2 className="text-xs font-semibold uppercase tracking-widest text-gray-500 mb-3">Quick Actions</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <button
+            type="button"
+            onClick={onViewWallets}
+            className="flex items-center justify-center gap-2 px-4 py-3 bg-gray-800/60 border border-gray-700/50 text-gray-300 rounded-xl text-sm font-semibold hover:bg-gray-800 hover:text-white hover:border-cyan-500/30 transition-all"
+          >
+            <Wallet className="w-4 h-4 text-cyan-400" />
+            View Wallets
+          </button>
+          <button
+            type="button"
+            onClick={onViewHistory}
+            className="flex items-center justify-center gap-2 px-4 py-3 bg-gray-800/60 border border-gray-700/50 text-gray-300 rounded-xl text-sm font-semibold hover:bg-gray-800 hover:text-white hover:border-emerald-500/30 transition-all"
+          >
+            <History className="w-4 h-4 text-emerald-400" />
+            Trade History
+          </button>
+          <button
+            type="button"
+            onClick={onViewAnalytics}
+            className="flex items-center justify-center gap-2 px-4 py-3 bg-gray-800/60 border border-gray-700/50 text-gray-300 rounded-xl text-sm font-semibold hover:bg-gray-800 hover:text-white hover:border-orange-500/30 transition-all"
+          >
+            <BarChart3 className="w-4 h-4 text-orange-400" />
+            Analytics
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
@@ -4015,7 +4076,7 @@ function WalletLibrary({
   onRescan,
 }: {
   wallets: FavoriteWallet[];
-  onAdd: (wallet: Omit<FavoriteWallet, 'id' | 'created_at'>) => Promise<boolean>;
+  onAdd: (wallet: NewFavoriteWallet) => Promise<boolean>;
   onUpdate: (id: string, updates: { nickname?: string; notes?: string | null }) => Promise<boolean>;
   onDelete: (id: string) => Promise<boolean>;
   onOpen: (wallet: FavoriteWallet) => void;
