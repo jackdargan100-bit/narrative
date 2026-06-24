@@ -124,6 +124,41 @@ function normalizeFavoriteWallet(row: Partial<FavoriteWallet>): FavoriteWallet {
   };
 }
 
+type WalletScanStatus = 'not_scanned' | 'ready' | 'empty';
+
+function getWalletScanStatus(wallet: FavoriteWallet): WalletScanStatus {
+  if (wallet.last_scanned_at === null) return 'not_scanned';
+  if (wallet.trade_count > 0) return 'ready';
+  return 'empty';
+}
+
+function formatWalletAddress(address: string): string {
+  if (address.length <= 9) return address;
+  return `${address.slice(0, 4)}…${address.slice(-4)}`;
+}
+
+function formatRelativeScanTime(iso: string | null): string {
+  if (!iso) return 'Never scanned';
+  const date = new Date(iso);
+  const diffSec = Math.round((date.getTime() - Date.now()) / 1000);
+  const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
+  const absSec = Math.abs(diffSec);
+  if (absSec < 60) return rtf.format(diffSec, 'second');
+  const diffMin = Math.round(diffSec / 60);
+  if (Math.abs(diffMin) < 60) return rtf.format(diffMin, 'minute');
+  const diffHr = Math.round(diffSec / 3600);
+  if (Math.abs(diffHr) < 24) return rtf.format(diffHr, 'hour');
+  const diffDay = Math.round(diffSec / 86400);
+  if (Math.abs(diffDay) < 30) return rtf.format(diffDay, 'day');
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+const WALLET_SCAN_STATUS_STYLES: Record<WalletScanStatus, { label: string; className: string }> = {
+  not_scanned: { label: 'Not scanned', className: 'bg-gray-800/60 text-gray-400 border-gray-700/50' },
+  ready: { label: 'Ready', className: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/25' },
+  empty: { label: 'No trades found', className: 'bg-orange-500/15 text-orange-400 border-orange-500/25' },
+};
+
 const STORAGE_KEYS = {
   TRADES: 'narrative_trades',
   WALLETS: 'narrative_wallets',
@@ -544,10 +579,12 @@ function App() {
                   />
                 )}
                 {activeTab === 'wallets' && (
-                  <FavoriteWallets
+                  <WalletLibrary
                     wallets={wallets}
                     onAdd={handleAddWallet}
                     onDelete={handleDeleteWallet}
+                    onOpen={() => {}}
+                    onRescan={() => {}}
                   />
                 )}
                 {activeTab === 'journal' && (
@@ -3536,43 +3573,78 @@ function EmptyChartState({ msg }: { msg?: string }) {
 }
 
 
-function FavoriteWallets({ wallets, onAdd, onDelete }) {
+function WalletLibrary({
+  wallets,
+  onAdd,
+  onDelete,
+  onOpen,
+  onRescan,
+}: {
+  wallets: FavoriteWallet[];
+  onAdd: (wallet: Omit<FavoriteWallet, 'id' | 'created_at'>) => void;
+  onDelete: (id: string) => void;
+  onOpen: (wallet: FavoriteWallet) => void;
+  onRescan: (wallet: FavoriteWallet) => void;
+}) {
   const [newWallet, setNewWallet] = useState({ wallet_address: '', nickname: '', notes: '' });
-  const [copied, setCopied] = useState<string | null>(null);
+  const [phase4Banner, setPhase4Banner] = useState<string | null>(null);
+  const bannerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showPhase4Banner = (action: 'open' | 'rescan') => {
+    if (bannerTimeoutRef.current) clearTimeout(bannerTimeoutRef.current);
+    setPhase4Banner(`${action === 'open' ? 'Open' : 'Re-scan'} navigation is coming in Phase 4.`);
+    bannerTimeoutRef.current = setTimeout(() => setPhase4Banner(null), 4000);
+  };
+
+  useEffect(() => () => {
+    if (bannerTimeoutRef.current) clearTimeout(bannerTimeoutRef.current);
+  }, []);
 
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault();
-    onAdd(newWallet);
+    onAdd({
+      wallet_address: newWallet.wallet_address,
+      nickname: newWallet.nickname,
+      notes: newWallet.notes.trim() || null,
+    });
     setNewWallet({ wallet_address: '', nickname: '', notes: '' });
   };
 
-  const copyToClipboard = async (address: string) => {
-    try {
-      await navigator.clipboard.writeText(address);
-      setCopied(address);
-      setTimeout(() => setCopied(null), 2000);
-    } catch (err) {
-      console.error('Failed to copy:', err);
-    }
+  const handleOpen = (wallet: FavoriteWallet) => {
+    if (wallet.last_scanned_at === null) return;
+    onOpen(wallet);
+    showPhase4Banner('open');
+  };
+
+  const handleRescan = (wallet: FavoriteWallet) => {
+    onRescan(wallet);
+    showPhase4Banner('rescan');
   };
 
   return (
     <div className="space-y-6">
+      {phase4Banner && (
+        <div className="flex items-start gap-3 px-4 py-3 bg-cyan-500/8 border border-cyan-500/20 rounded-xl">
+          <ClockIcon className="w-4 h-4 text-cyan-400 flex-shrink-0 mt-0.5" />
+          <p className="text-xs text-cyan-300/90 leading-relaxed">{phase4Banner}</p>
+        </div>
+      )}
+
       <div className="bg-[#12141a]/90 backdrop-blur border border-gray-800/60 rounded-2xl p-6 sm:p-8">
         <div className="flex items-center gap-3 mb-6">
           <div className="w-10 h-10 rounded-lg bg-cyan-500/20 flex items-center justify-center">
             <Wallet className="w-5 h-5 text-cyan-400" />
           </div>
           <div>
-            <h2 className="text-xl font-bold text-white">Add Favorite Wallet</h2>
-            <p className="text-sm text-gray-500">Track wallets to follow their moves</p>
+            <h2 className="text-xl font-bold text-white">Wallet Library</h2>
+            <p className="text-sm text-gray-500">Saved wallets and scan history</p>
           </div>
         </div>
 
         <form onSubmit={handleAdd} className="space-y-4">
           <div className="grid md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm text-gray-400 mb-2 font-medium">Wallet Address</label>
+              <label className="block text-sm text-gray-400 mb-2 font-medium">Public Wallet Address</label>
               <input
                 type="text"
                 value={newWallet.wallet_address}
@@ -3588,19 +3660,19 @@ function FavoriteWallets({ wallets, onAdd, onDelete }) {
                 type="text"
                 value={newWallet.nickname}
                 onChange={(e) => setNewWallet({ ...newWallet, nickname: e.target.value })}
-                placeholder="e.g., Whale Alpha, Smart Money"
+                placeholder="e.g., Momentum Architect"
                 className="w-full bg-gray-900/50 border border-gray-800 rounded-xl px-4 py-3 focus:outline-none focus:border-cyan-500/50 focus:bg-gray-900/70 transition-all text-white placeholder-gray-600"
                 required
               />
             </div>
           </div>
           <div>
-            <label className="block text-sm text-gray-400 mb-2 font-medium">Notes</label>
+            <label className="block text-[10px] text-gray-600 mb-1.5 font-medium uppercase tracking-wider">Notes (optional)</label>
             <textarea
               value={newWallet.notes}
               onChange={(e) => setNewWallet({ ...newWallet, notes: e.target.value })}
-              placeholder="Why do you track this wallet?"
-              className="w-full bg-gray-900/50 border border-gray-800 rounded-xl px-4 py-3 focus:outline-none focus:border-cyan-500/50 focus:bg-gray-900/70 transition-all min-h-[80px] resize-y text-white placeholder-gray-600"
+              placeholder="Why are you tracking this wallet?"
+              className="w-full bg-gray-900/30 border border-gray-800/60 rounded-xl px-4 py-2.5 focus:outline-none focus:border-gray-700/80 focus:bg-gray-900/40 transition-all min-h-[56px] resize-y text-sm text-gray-400 placeholder-gray-700"
             />
           </div>
           <button
@@ -3608,64 +3680,86 @@ function FavoriteWallets({ wallets, onAdd, onDelete }) {
             className="flex items-center gap-2 bg-gradient-to-r from-cyan-500 to-teal-500 text-white px-6 py-3.5 rounded-xl font-semibold hover:from-cyan-400 hover:to-teal-400 transition-all duration-200 shadow-lg shadow-cyan-500/20"
           >
             <PlusCircle className="w-4 h-4" />
-            Add Wallet
+            Save Wallet
           </button>
         </form>
       </div>
 
-      <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
-        {wallets.map((wallet) => (
-          <div
-            key={wallet.id}
-            className="group bg-[#12141a]/90 backdrop-blur border border-gray-800/60 rounded-xl p-5 hover:border-cyan-500/40 transition-all duration-300"
-          >
-            <div className="flex justify-between items-start mb-3">
-              <div className="flex-1 min-w-0">
-                <h3 className="font-semibold text-lg text-white mb-1">{wallet.nickname}</h3>
-                <p className="text-xs text-gray-500 font-mono truncate flex items-center gap-1.5">
-                  <Hash className="w-3 h-3 flex-shrink-0" />
-                  {wallet.wallet_address.slice(0, 8)}...{wallet.wallet_address.slice(-8)}
-                </p>
+      {wallets.length > 0 && (
+        <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {wallets.map((wallet) => {
+            const scanStatus = getWalletScanStatus(wallet);
+            const statusStyle = WALLET_SCAN_STATUS_STYLES[scanStatus];
+            const canOpen = wallet.last_scanned_at !== null;
+            const lastScannedLabel = wallet.last_scanned_at
+              ? `Last scanned ${formatRelativeScanTime(wallet.last_scanned_at)}`
+              : 'Never scanned';
+
+            return (
+              <div
+                key={wallet.id}
+                className="bg-[#12141a]/90 backdrop-blur border border-gray-800/60 rounded-xl p-5 hover:border-cyan-500/30 transition-all duration-300 flex flex-col"
+              >
+                <div className="flex justify-between items-start gap-3 mb-3">
+                  <div className="flex-1 min-w-0">
+                    <h3 className="font-semibold text-lg text-white mb-1 truncate">{wallet.nickname}</h3>
+                    <p className="text-xs text-gray-500 font-mono truncate">
+                      {formatWalletAddress(wallet.wallet_address)}
+                    </p>
+                  </div>
+                  <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border flex-shrink-0 ${statusStyle.className}`}>
+                    {statusStyle.label}
+                  </span>
+                </div>
+
+                <div className="text-xs text-gray-400 mb-3 space-y-0.5">
+                  <p>
+                    {wallet.trade_count} trade{wallet.trade_count !== 1 ? 's' : ''}
+                  </p>
+                  <p className="text-gray-500">{lastScannedLabel}</p>
+                </div>
+
+                {wallet.notes && (
+                  <p className="text-xs text-gray-500 line-clamp-2 bg-gray-800/20 rounded-lg p-2 mb-3">{wallet.notes}</p>
+                )}
+
+                <div className="flex gap-2 mt-auto pt-1">
+                  <button
+                    type="button"
+                    onClick={() => handleOpen(wallet)}
+                    disabled={!canOpen}
+                    title={canOpen ? 'Open saved scan results' : 'Scan this wallet in Import Trades first'}
+                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-gray-800/60 border border-gray-700/50 text-gray-300 rounded-lg text-xs font-semibold hover:bg-gray-800 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-gray-800/60 disabled:hover:text-gray-300 transition-colors"
+                  >
+                    <BookOpen className="w-3.5 h-3.5" />
+                    Open
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleRescan(wallet)}
+                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-gray-800/60 border border-gray-700/50 text-gray-300 rounded-lg text-xs font-semibold hover:bg-gray-800 hover:text-cyan-300 transition-colors"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Re-scan
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDelete(wallet.id)}
+                    className="flex items-center justify-center gap-1.5 px-3 py-2 bg-gray-800/60 border border-gray-700/50 text-gray-400 rounded-lg text-xs font-semibold hover:bg-red-500/10 hover:border-red-500/30 hover:text-red-400 transition-colors"
+                    title="Remove wallet from library"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete
+                  </button>
+                </div>
               </div>
-              <div className="flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                <button
-                  onClick={() => copyToClipboard(wallet.wallet_address)}
-                  className="p-2 bg-gray-800/80 rounded-lg text-gray-500 hover:text-cyan-400 hover:bg-gray-800 transition-colors"
-                  title="Copy address"
-                >
-                  {copied === wallet.wallet_address ? (
-                    <Check className="w-4 h-4 text-emerald-400" />
-                  ) : (
-                    <Copy className="w-4 h-4" />
-                  )}
-                </button>
-                <a
-                  href={`https://solscan.io/account/${wallet.wallet_address}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="p-2 bg-gray-800/80 rounded-lg text-gray-500 hover:text-emerald-400 hover:bg-gray-800 transition-colors"
-                  title="View on Solscan"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                </a>
-                <button
-                  onClick={() => onDelete(wallet.id)}
-                  className="p-2 bg-gray-800/80 rounded-lg text-gray-500 hover:text-red-400 hover:bg-gray-800 transition-colors"
-                  title="Remove wallet"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-            {wallet.notes && (
-              <p className="text-sm text-gray-400 line-clamp-2 bg-gray-800/20 rounded-lg p-2.5">{wallet.notes}</p>
-            )}
-          </div>
-        ))}
-      </div>
+            );
+          })}
+        </div>
+      )}
 
       {wallets.length === 0 && (
-        <EmptyState message="No favorite wallets yet. Add wallets you want to track!" />
+        <EmptyState message="No saved wallets yet. Add a wallet above or scan one in Import Trades." />
       )}
     </div>
   );
