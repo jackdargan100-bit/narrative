@@ -197,6 +197,150 @@ function sortWallets(wallets: FavoriteWallet[], sortBy: WalletSortBy): FavoriteW
   return sorted;
 }
 
+type WalletClassificationLabel =
+  | 'scalper'
+  | 'swing_trader'
+  | 'high_conviction'
+  | 'possible_arbitrage'
+  | 'unclassified';
+
+interface WalletScanMetrics {
+  tradeCount: number;
+  uniqueTokens: number;
+  medianSolSize: number;
+  medianInterTradeMinutes: number;
+  topTokenShare: number;
+  repeatMintCount: number;
+  roundTripMints: number;
+}
+
+interface WalletClassificationResult {
+  label: WalletClassificationLabel;
+  displayLabel: string;
+  reason: string;
+}
+
+const WALLET_CLASSIFICATION_STYLES: Record<WalletClassificationLabel, { className: string }> = {
+  scalper: { className: 'bg-orange-500/15 text-orange-300 border-orange-500/30' },
+  swing_trader: { className: 'bg-blue-500/15 text-blue-300 border-blue-500/30' },
+  high_conviction: { className: 'bg-purple-500/15 text-purple-300 border-purple-500/30' },
+  possible_arbitrage: { className: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  unclassified: { className: 'bg-gray-800/60 text-gray-400 border-gray-700/50' },
+};
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+function computeWalletMetrics(trades: DbWalletScanTrade[]): WalletScanMetrics {
+  const tradeCount = trades.length;
+  const mintCounts = new Map<string, number>();
+  const closedMintCounts = new Map<string, number>();
+
+  for (const t of trades) {
+    mintCounts.set(t.contract_address, (mintCounts.get(t.contract_address) ?? 0) + 1);
+    if (t.status === 'closed') {
+      closedMintCounts.set(t.contract_address, (closedMintCounts.get(t.contract_address) ?? 0) + 1);
+    }
+  }
+
+  const uniqueTokens = mintCounts.size;
+  const repeatMintCount = [...mintCounts.values()].filter(c => c >= 2).length;
+  const roundTripMints = [...closedMintCounts.values()].filter(c => c >= 2).length;
+  const topTokenShare = tradeCount > 0 ? Math.max(...mintCounts.values()) / tradeCount : 0;
+
+  const solSizes = trades.map(t => t.sol_amount || t.position_size).filter(v => v > 0);
+  const medianSolSize = median(solSizes);
+
+  const sortedTs = [...trades].map(t => t.timestamp).sort((a, b) => a - b);
+  const gaps: number[] = [];
+  for (let i = 1; i < sortedTs.length; i++) {
+    gaps.push((sortedTs[i] - sortedTs[i - 1]) / 60_000);
+  }
+  const medianInterTradeMinutes = median(gaps);
+
+  return {
+    tradeCount,
+    uniqueTokens,
+    medianSolSize,
+    medianInterTradeMinutes,
+    topTokenShare,
+    repeatMintCount,
+    roundTripMints,
+  };
+}
+
+/** Client-side wallet classification from saved scan data only. Returns null if never scanned. */
+function classifyWallet(wallet: FavoriteWallet): WalletClassificationResult | null {
+  if (wallet.last_scanned_at === null) return null;
+
+  const trades = wallet.saved_results ?? [];
+
+  if (trades.length === 0) {
+    return {
+      label: 'unclassified',
+      displayLabel: 'Unclassified',
+      reason: 'Based on last scan: no trades found in the last 100 transactions.',
+    };
+  }
+
+  if (trades.length < 3) {
+    return {
+      label: 'unclassified',
+      displayLabel: 'Unclassified',
+      reason: `Based on last scan: not enough trades to classify (${trades.length} found, need 3+).`,
+    };
+  }
+
+  const m = computeWalletMetrics(trades);
+
+  if (m.tradeCount >= 8 && m.medianInterTradeMinutes <= 45 && m.uniqueTokens >= 4) {
+    return {
+      label: 'scalper',
+      displayLabel: 'Scalper',
+      reason: `Based on last scan: ${m.tradeCount} trades, median gap ${Math.round(m.medianInterTradeMinutes)}m, ${m.uniqueTokens} tokens.`,
+    };
+  }
+
+  if (m.roundTripMints >= 2 && m.medianInterTradeMinutes <= 30 && m.repeatMintCount >= 3) {
+    return {
+      label: 'possible_arbitrage',
+      displayLabel: 'Possible Arbitrage',
+      reason: `Based on last scan: repeated round-trips on ${m.roundTripMints} tokens, median gap ${Math.round(m.medianInterTradeMinutes)}m.`,
+    };
+  }
+
+  if (m.uniqueTokens <= 3 && m.medianSolSize >= 1.5 && m.topTokenShare >= 0.4) {
+    return {
+      label: 'high_conviction',
+      displayLabel: 'High Conviction',
+      reason: `Based on last scan: ${m.uniqueTokens} tokens, median size ${m.medianSolSize.toFixed(1)} SOL, ${Math.round(m.topTokenShare * 100)}% on top token.`,
+    };
+  }
+
+  if (m.medianInterTradeMinutes >= 180 && m.uniqueTokens >= 2 && m.tradeCount >= 4) {
+    const gapHours = m.medianInterTradeMinutes >= 60
+      ? `${(m.medianInterTradeMinutes / 60).toFixed(1)}h`
+      : `${Math.round(m.medianInterTradeMinutes)}m`;
+    return {
+      label: 'swing_trader',
+      displayLabel: 'Swing Trader',
+      reason: `Based on last scan: ${m.tradeCount} trades, median gap ${gapHours}, ${m.uniqueTokens} tokens.`,
+    };
+  }
+
+  return {
+    label: 'unclassified',
+    displayLabel: 'Unclassified',
+    reason: 'Based on last scan: mixed trading pattern in the last 100 transactions.',
+  };
+}
+
 type WalletImportLaunch = {
   mode: 'open' | 'rescan';
   wallet_address: string;
@@ -3892,6 +4036,10 @@ function WalletLibrary({
                   ? `Last scanned ${formatRelativeScanTime(wallet.last_scanned_at)}`
                   : 'Never scanned';
                 const isEditing = editingId === wallet.id;
+                const classification = classifyWallet(wallet);
+                const classificationStyle = classification
+                  ? WALLET_CLASSIFICATION_STYLES[classification.label]
+                  : null;
 
                 return (
                   <div
@@ -3932,6 +4080,18 @@ function WalletLibrary({
                         )}
                       </div>
                     </div>
+
+                    {classification && classificationStyle && (
+                      <div className="mb-2">
+                        <span
+                          className={`inline-flex text-[10px] font-semibold px-2 py-0.5 rounded-full border ${classificationStyle.className}`}
+                          title={classification.reason}
+                        >
+                          {classification.displayLabel}
+                        </span>
+                        <p className="text-[10px] text-gray-600 mt-1.5 leading-relaxed">{classification.reason}</p>
+                      </div>
+                    )}
 
                     <p className="text-[10px] text-gray-600 mb-3 leading-relaxed">{statusStyle.hint}</p>
 
